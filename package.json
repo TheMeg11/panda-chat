@@ -1,0 +1,13 @@
+{
+  "name": "panda-chat",
+  "version": "2.0.0",
+  "private": true,
+  "description": "E2EE chat website bridged to a Telegram bot",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  }
+}

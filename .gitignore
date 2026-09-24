@@ -1,0 +1,12 @@
+# live data — never commit
+data.json
+data.json.*
+tgcache/
+vault-backup*
+*.tmp
+
+# logs & test artifacts
+*.log
+boot-test*
+
+node_modules/
