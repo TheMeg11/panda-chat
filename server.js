@@ -189,6 +189,13 @@ const state = {
      pubkey JSON), counter, created, regAt, ua }. The CK still never leaves
      the browser: fingerprint login re-uses the v20.1 fallback wrap. */
   finger: null,
+  /* v29: real last-seen — {tg: ts of last admin activity, users: {nameLower: ts}} */
+  lastSeen: { tg: 0, users: {} },
+  /* v29: trusted devices — devId(hex) -> {id, label, name, jwk, ip, ua,
+     createdAt, approvedAt, lastUsedAt, revoked}. Only the PUBLIC half of an
+     EC P-256 pair lives here; login proves key possession over a server nonce
+     and the private half stays wrapped inside the local pattern/PIN lock. */
+  devices: {},
 };
 function authMode() { return state.auth && state.auth.mode === 'new' ? 'new' : 'legacy'; }
 
@@ -238,6 +245,8 @@ function fbKekB64() {
   }
 }
 
+/* v29: shared sanitizer for device labels / UAs — no control chars, no <> */
+const devLabel = (s) => String(s || '').replace(/\p{Cc}/gu, ' ').replace(/[<>]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60);
 function loadData() {
   let raw = null;
   try { raw = fs.readFileSync(DATA_FILE, 'utf8'); } catch { return; /* first boot */ }
@@ -281,6 +290,39 @@ function loadData() {
       jwk: String(j.finger.jwk).slice(0, 512), counter: Number(j.finger.counter) || 0,
       created: Number(j.finger.created) || 0, regAt: Number(j.finger.regAt) || 0,
       ua: String(j.finger.ua || '').replace(/[\u0000-\u001f<>]/g, ' ').slice(0, 60) };
+    /* v29: last-seen map (bounded) */
+    if (j.lastSeen && typeof j.lastSeen === 'object') {
+      state.lastSeen = { tg: Number(j.lastSeen.tg) || 0, users: {} };
+      const lu = j.lastSeen.users;
+      if (lu && typeof lu === 'object') {
+        for (const [k, v] of Object.entries(lu).slice(-80)) {
+          const ts = Number(v);
+          if (ts > 0) state.lastSeen.users[String(k).toLowerCase().slice(0, 40)] = ts;
+        }
+      }
+    }
+    /* v29: trusted devices (public JWKs only — re-validate every field) */
+    if (j.devices && typeof j.devices === 'object') {
+      for (const [id, d] of Object.entries(j.devices)) {
+        const did = String(id).toLowerCase().slice(0, 64);
+        if (!/^[a-z0-9]{16,64}$/.test(did) || !d || typeof d !== 'object') continue;
+        let jwk = null;
+        try { jwk = JSON.parse(String(d.jwk || '')); } catch {}
+        if (!jwk || jwk.kty !== 'EC' || jwk.crv !== 'P-256' || !jwk.x || !jwk.y) continue;
+        state.devices[did] = {
+          id: did,
+          label: devLabel(d.label),
+          name: sanitizeName(d.name),
+          jwk: JSON.stringify({ kty: 'EC', crv: 'P-256', x: String(jwk.x).slice(0, 64), y: String(jwk.y).slice(0, 64) }),
+          ip: String(d.ip || '').slice(0, 60),
+          ua: devLabel(d.ua),
+          createdAt: Number(d.createdAt) || 0,
+          approvedAt: Number(d.approvedAt) || 0,
+          lastUsedAt: Number(d.lastUsedAt) || 0,
+          revoked: !!d.revoked,
+        };
+      }
+    }
     if (Array.isArray(j.sessions)) loadSessions(j.sessions);
   }
 }
@@ -299,6 +341,7 @@ function flushSave() {
       revokeAt: state.revokeAt, siteTitle: state.siteTitle, sidSeq: state.sidSeq,
       lastBackupAt: state.lastBackupAt, vaultFallback: state.vaultFallback,
       finger: state.finger,
+      lastSeen: state.lastSeen, devices: state.devices,   // v29
       sessions: sessionsForDisk(),
     });
     const tmp = DATA_FILE + '.tmp';
@@ -405,7 +448,7 @@ function loadSessions(arr) {
   for (const r of arr) {
     if (!r || typeof r.tok !== 'string' || !r.sid || !(r.exp > now - 24 * 3600 * 1000)) continue;
     const rec = { sid: String(r.sid), tok: r.tok, t: Number(r.t) || now, exp: Number(r.exp) || now,
-                  kind: ['claim', 'reentry'].includes(r.kind) ? r.kind : 'pw', name: String(r.name || ''), code: String(r.code || ''),
+                  kind: ['claim', 'reentry', 'finger', 'device'].includes(r.kind) ? r.kind : 'pw', name: String(r.name || ''), code: String(r.code || ''),
                   ip: String(r.ip || ''), dev: String(r.dev || ''), revoked: !!r.revoked };
     sessions.set(rec.tok, rec); sidIndex.set(rec.sid, rec.tok);
     const n = parseInt(rec.sid, 10); if (Number.isFinite(n) && n >= state.sidSeq) state.sidSeq = n + 1;
@@ -418,7 +461,7 @@ function registerSession(tok, kind, info) {
   if (!exp) return null;
   let sid = String(++state.sidSeq);
   while (sidIndex.has(sid)) sid = String(++state.sidSeq);  // paranoia after manual edits
-  const rec = { sid, tok: String(tok), t: Date.now(), exp, kind: ['claim', 'reentry', 'finger'].includes(kind) ? kind : 'pw',
+  const rec = { sid, tok: String(tok), t: Date.now(), exp, kind: ['claim', 'reentry', 'finger', 'device'].includes(kind) ? kind : 'pw',
                 name: sanitizeName(info && info.name), code: sanitizeCode(info && info.code),
                 ip: String((info && info.ip) || ''), dev: String((info && info.dev) || '').slice(0, 60), revoked: false };
   sessions.set(rec.tok, rec); sidIndex.set(rec.sid, rec.tok);
@@ -1146,6 +1189,91 @@ function resolveFingerRequest(id, decision) {
   return { code: 'ok', rec };
 }
 
+/* ============================================================
+   v29 — trusted device (ورود بدون رمز، فقط با قفل شخصی)
+   Flow (admin-gated, mirrors the v27 finger flow):
+     1. logged-in user → sets a local pattern/PIN lock, generates an
+        EC P-256 keypair in the browser, POSTs /api/device/req
+        {devId, pub JWK, label} → TG card → admin ✅/❌
+     2. approved → state.devices[devId] = {pub, label, name, …} (persisted)
+     3. gate login → POST /api/device/challenge {devId} → nonce
+                           POST /api/device/login {devId, nonce, sig}
+                       → session + v20.1 fallback wrap (same as reentry)
+   Server keeps ONLY the public JWK. The private half never leaves the
+   browser and is AES-GCM wrapped under the user's pattern/PIN, so a
+   stranger with the phone cannot passwordless-enter without the lock.
+   ============================================================ */
+const devReqs = new Map();   // id -> pending registration rec (RAM)
+const devChal = new Map();   // nonce -> {devId, exp} (single-use)
+setInterval(() => { const now = Date.now(); for (const [n, r] of devChal) if (r.exp < now) devChal.delete(n); }, 30000);
+
+/* WebCrypto ECDSA signs IEEE-P1363 (raw r||s, 64B); accept DER too. */
+function devVerify(jwk, data, sig) {
+  try {
+    const key = crypto.createPublicKey({ key: jwk, format: 'jwk' });
+    if (crypto.verify('sha256', data, { key, dsaEncoding: 'ieee-p1363' }, sig)) return true;
+    return crypto.verify('sha256', data, key, sig);
+  } catch { return false; }
+}
+
+function deviceCardText(rec) {
+  const mins = Math.round(REQ_TTL / 60000);
+  return [
+    '\u{1F4F1} درخواست اعتماد به دستگاه (ورود بدون رمز)',
+    '',
+    '\u{1F464} نام کاربر: ' + rec.name,
+    '\u{1F4F1} دستگاه: ' + (rec.label || 'نامشخص'),
+    '\u{1F310} IP: ' + (rec.ip || '?'),
+    '\u{1F517} شناسه: ' + rec.devId.slice(0, 8) + '…',
+    '\u23F3 زمان تصمیم\u200cگیری: ' + faMin(mins) + ' دقیقه',
+    '',
+    'با زدن \u2705 این دستگاه می\u200cتواند بدون تایپ رمز سایت و فقط با «قفل شخصی» (الگو/کد) وارد شود.',
+    'اگر شناسه را نمی\u200cشناسی، رد کن — با رد، تا ۲۴ ساعت درخواست مجدد ممکن نیست.',
+  ].join('\n');
+}
+async function sendDeviceCard(rec) {
+  const txt = deviceCardText(rec);
+  const res = await tgEnqueue(() => tgCall('sendMessage', {
+    chat_id: state.adminId,
+    text: txt,
+    disable_web_page_preview: true,
+    reply_markup: { inline_keyboard: [[
+      { text: '\u2705 تایید دستگاه', callback_data: 'drq:' + rec.id + ':a' },
+      { text: '\u274C رد', callback_data: 'drq:' + rec.id + ':d' },
+    ]] },
+  }));
+  rec.msgId = res && res.message_id || null;
+  rec.cardText = txt;
+}
+function resolveDeviceRequest(id, decision) {
+  const rec = devReqs.get(id);
+  if (!rec) return { code: 'gone' };
+  if (rec.status !== 'pending') return { code: 'done', rec };
+  rec.status = decision === 'a' ? 'approved' : 'denied';
+  if (rec.status === 'denied') deny24.set(rec.ip || '?', Date.now());
+  if (rec.status === 'approved' && authMode() === 'new') {
+    state.devices[rec.devId] = {
+      id: rec.devId, label: rec.label, name: rec.name, nameLower: rec.nameLower,
+      jwk: rec.pub, ip: rec.ip, ua: rec.ua,
+      createdAt: Date.now(), approvedAt: Date.now(), lastUsedAt: 0, revoked: false,
+    };
+    saveData();
+  }
+  const label = rec.status === 'approved'
+    ? '\u2705 تایید شد — این دستگاه از این پس با قفل شخصی وارد می\u200cشود.'
+    : '\u274C رد شد — تا ۲۴ ساعت امکان درخواست مجدد نیست.';
+  if (rec.msgId && TG_TOKEN && state.adminId) {
+    tgEnqueue(() => tgCall('editMessageText', {
+      chat_id: state.adminId, message_id: rec.msgId,
+      text: (rec.cardText || '') + '\n\n' + label,
+      reply_markup: { inline_keyboard: [] },
+    }).catch(() => {})).catch(() => {});
+  }
+  broadcastSafe({ type: 'device', id: rec.id, devId: rec.devId, status: rec.status });
+  log('device-request', id.slice(0, 8), rec.status);
+  return { code: 'ok', rec };
+}
+
 /* v20: attack ban — informative card to the admin with the exact unban command
    (command + identifier shown stuck together so it is copy-paste ready) */
 async function bannedNotify(name, dev, ip) {
@@ -1208,14 +1336,14 @@ async function resolveRequest(id, decision) {
 async function handleCallbackQuery(cq) {
   try {
     const data = String(cq.data || '');
-    /* v27: frq: prefix — fingerprint-enable requests (same approve/deny flow) */
-    const mm = /^(arq|frq):([a-z0-9]+):([ad])$/.exec(data);
+    /* v27: frq: prefix — fingerprint-enable requests; v29: drq: — trusted devices (same approve/deny flow) */
+    const mm = /^(arq|frq|drq):([a-z0-9]+):([ad])$/.exec(data);
     const answer = (text, alert) => tgEnqueue(() => tgCall('answerCallbackQuery', {
       callback_query_id: cq.id, text: text || undefined, show_alert: !!alert,
     })).catch(() => {});
     if (!mm) { await answer('درخواست نامعتبر است.', true); return; }
     const [, rqKind, id, dec] = mm;
-    const rec = (rqKind === 'frq' ? fingerReqs : pendingReq).get(id);
+    const rec = (rqKind === 'frq' ? fingerReqs : rqKind === 'drq' ? devReqs : pendingReq).get(id);
     if (!rec) {
       await editDeadButtons(cq, 'این درخواست دیگر وجود ندارد.');
       await answer('این درخواست منقضی شده است. \u23F3', true);
@@ -1223,7 +1351,7 @@ async function handleCallbackQuery(cq) {
     }
     if (Date.now() > rec.exp) {
       if (rec.status === 'pending') {
-        if (rqKind === 'frq') { rec.status = 'expired'; broadcastSafe({ type: 'finger', id: rec.id, status: 'expired' }); if (rec.msgId && TG_TOKEN && state.adminId) tgEnqueue(() => tgCall('editMessageText', { chat_id: state.adminId, message_id: rec.msgId, text: (rec.cardText || '') + '\n\n\u23F3 زمان تصمیم\u200cگیری تمام شد — درخواست منقضی شد.', reply_markup: { inline_keyboard: [] } }).catch(() => {})).catch(() => {}); }
+        if (rqKind === 'frq' || rqKind === 'drq') { rec.status = 'expired'; broadcastSafe({ type: rqKind === 'frq' ? 'finger' : 'device', id: rec.id, status: 'expired' }); if (rec.msgId && TG_TOKEN && state.adminId) tgEnqueue(() => tgCall('editMessageText', { chat_id: state.adminId, message_id: rec.msgId, text: (rec.cardText || '') + '\n\n\u23F3 زمان تصمیم\u200cگیری تمام شد — درخواست منقضی شد.', reply_markup: { inline_keyboard: [] } }).catch(() => {})).catch(() => {}); }
         else await expireRequest(rec);
       }
       await editDeadButtons(cq, '\u23F3 این درخواست منقضی شده بود.');
@@ -1238,6 +1366,7 @@ async function handleCallbackQuery(cq) {
     const allowed = !cq.message || !cq.from || !state.adminId || String(cq.from.id) === String(state.adminId);
     if (!allowed) { await answer('فقط ادمین مجاز است.', true); return; }
     if (rqKind === 'frq') resolveFingerRequest(id, dec);
+    else if (rqKind === 'drq') resolveDeviceRequest(id, dec);
     else await resolveRequest(id, dec);
     await answer(dec === 'a' ? 'تایید شد \u2705' : 'رد شد \u274C');
   } catch (e) { log('callback err:', e.message); }
@@ -1295,9 +1424,47 @@ function broadcastSafe(obj) {
 }
 function presenceCount() {
   const tgAlive = Date.now() - adminActiveAt < 90 * 1000;
-  return { n: sseClients.size + (tgAlive ? 1 : 0), tg: tgAlive, adminLinked: !!state.adminId };
+  return { n: sseClients.size + (tgAlive ? 1 : 0), tg: tgAlive, adminLinked: !!state.adminId,
+           tgSeen: state.lastSeen.tg || 0 };   // v29: real last-seen for the site
 }
 function presenceTick() { broadcast(Object.assign({ type: 'presence' }, presenceCount())); }
+
+/* ------------------------- v29: real last-seen ------------------------- */
+function faAgo(ts) {
+  const t = Number(ts) || 0;
+  if (!t) return 'نامعلوم';
+  const d = Date.now() - t;
+  if (d < 90 * 1000) return 'همین حالا';
+  const m = Math.floor(d / 60000);
+  if (m < 60) return faNum(m) + ' دقیقه پیش';
+  const h = Math.floor(m / 60);
+  if (h < 24) return faNum(h) + ' ساعت پیش';
+  const days = Math.floor(h / 24);
+  if (days === 1) return 'دیروز';
+  if (days < 7) return faNum(days) + ' روز پیش';
+  try { return new Date(t).toLocaleDateString('fa-IR'); }
+  catch { return faNum(Math.max(1, Math.floor(days / 30))) + ' ماه پیش'; }
+}
+/* key: 'tg' for admin activity, or a site display-name for user activity.
+   15s debounce so typing bursts don't hammer data.json. */
+function touchLastSeen(key, nameHint) {
+  const now = Date.now();
+  if (key === 'tg') {
+    if (now - (state.lastSeen.tg || 0) < 15000) return;
+    state.lastSeen.tg = now;
+  } else {
+    const k = String(key || nameHint || '').toLowerCase().slice(0, 40);
+    if (!k) return;
+    if (now - (state.lastSeen.users[k] || 0) < 15000) return;
+    state.lastSeen.users[k] = now;
+    const keys = Object.keys(state.lastSeen.users);
+    if (keys.length > 60) {                       // bound the map
+      keys.sort((a, b) => state.lastSeen.users[a] - state.lastSeen.users[b]);
+      for (const old of keys.slice(0, keys.length - 60)) delete state.lastSeen.users[old];
+    }
+  }
+  saveData();
+}
 
 /* --------------- v20: session lifecycle notify (bot-only) ---------------
    open  = first live SSE connection of a session  -> «ورود به سایت» card
@@ -1740,6 +1907,8 @@ function helpText() {
     '/revoke yes — باطل‌کردن همهٔ نشست‌های سایت',
     '/revoke<شناسه> — اخراج فوری فقط یک نشست؛ مثال: /revoke1004',
     '/who — با ریپلای روی پیام سایت: مشخصات همان فرستنده؛ بدون ریپلای: لیست کاربران',
+    '/lastseen — لست‌سین واقعی: آخرین فعالیت کاربران سایت و طرف تلگرام',
+    '/devices — دستگاه‌های مورد اعتماد (ورود بدون رمز با قفل شخصی)؛ لغو: /rdev<شناسه>',
     '',
     '⚙️ تنظیمات:',
     '/name نام — تغییر نام نمایشی شما در سایت',
@@ -1775,6 +1944,9 @@ const BOT_COMMANDS = [
   { command: 'sessions', description: 'نشست‌های اخیر و درخواست‌های باز' },
   { command: 'revoke', description: 'باطل‌کردن نشست‌ها (همه یا یکی)' },
   { command: 'who', description: 'فرستندهٔ پیام (ریپلای) یا لیست کاربران' },
+  { command: 'lastseen', description: 'لست‌سین واقعی کاربران سایت' },
+  { command: 'devices', description: 'دستگاه‌های مورد اعتماد' },
+  { command: 'rdev', description: 'لغو اعتماد یک دستگاه؛ مثال: /rdev<شناسه>' },
   { command: 'name', description: 'تغییر نام نمایشی' },
   { command: 'title', description: 'تغییر عنوان سایت' },
   { command: 'pfp', description: 'تنظیم عکس پروفایل' },
@@ -1869,11 +2041,26 @@ async function handleCommand(msg, text) {
   if (stuckUnban) { await unbanHandle(stuckUnban[1].trim()); return; }
   /* v15: one-shot per-session revoke — /revoke1004 (no space) kills ONLY that session */
   const oneShot = /^\/revoke(\d{1,10})$/.exec(cmd);
+  /* v29: one-shot device untrust — /rdev<id8> (no space); prefix must match exactly one device */
+  const oneShotRdev = /^\/rdev([a-f0-9]{6,64})$/.exec(cmd);
+  if (oneShotRdev) {
+    const pfx = oneShotRdev[1];
+    const hits = Object.values(state.devices).filter(d => d.id.startsWith(pfx));
+    if (!hits.length) { await tgReply('❌ دستگاهی با شناسهٔ «' + pfx + '» پیدا نشد. فهرست با /devices'); return true; }
+    if (hits.length > 1) { await tgReply('⚠️ چند دستگاه با این پیشوند مطابقت دارند — شناسه را کامل‌تر کن. /devices'); return true; }
+    const d = hits[0];
+    delete state.devices[d.id];
+    saveData();
+    broadcastSafe({ type: 'device', devId: d.id, status: 'revoked' });
+    log('device revoked via bot:', d.id.slice(0, 8), (d.label || ''));
+    await tgReply('⛔ اعتماد دستگاه «' + (d.label || 'نامشخص') + '» (' + d.id.slice(0, 8) + '…) لغو شد — دیگر بدون رمز وارد نمی‌شود.');
+    return true;
+  }
   if (oneShot) {
     const r = revokeSession(oneShot[1]);
     if (!r) { await tgReply('❌ نشست #' + faNum(oneShot[1]) + ' پیدا نشد. لیست را با /sessions ببین.'); return true; }
     if (r.already) { await tgReply('ℹ️ نشست #' + faNum(r.rec.sid) + ' قبلاً اخراج شده بود.'); return true; }
-    const who = r.rec.kind === 'claim' ? ('بدون رمز («' + (r.rec.name || '؟') + '»' + (r.rec.code ? ' · 🏷 ' + r.rec.code : '') + ')') : r.rec.kind === 'finger' ? ('اثر انگشت («' + (r.rec.name || '؟') + '»)') : 'با رمز';
+    const who = r.rec.kind === 'claim' ? ('بدون رمز («' + (r.rec.name || '؟') + '»' + (r.rec.code ? ' · 🏷 ' + r.rec.code : '') + ')') : r.rec.kind === 'finger' ? ('اثر انگشت («' + (r.rec.name || '؟') + '»)') : r.rec.kind === 'device' ? ('دستگاه اعتمادشده («' + (r.rec.name || '؟') + '»)') : 'با رمز';
     await tgReply('⛔ نشست #' + faNum(r.rec.sid) + ' (' + who + ') اخراج شد — فقط همین نشست باطل شد و بقیه دست‌نخورده‌اند.');
     return true;
   }
@@ -1920,6 +2107,42 @@ async function handleCommand(msg, text) {
         }
       }
       await tgReply('👤 فرستندهٔ این پیام در سایت: ' + sname + '\n• این کاربر هنوز عکس پروفایلی ثبت نکرده است');
+      return true;
+    }
+    case '/lastseen': {
+      /* v29: real last-seen — tg side = admin activity, users = site activity */
+      const lines = ['🕒 لست‌سین واقعی (بروزرسانی با هر پیام/فعالیت):'];
+      const tgSeen = state.lastSeen.tg || 0;
+      const tgAlive = Date.now() - adminActiveAt < 90000;
+      lines.push('• تلگرام (شما): ' + (tgAlive ? 'همین حالا 🟢' : (tgSeen ? faAgo(tgSeen) : 'نامعلوم')));
+      const entries = Object.entries(state.lastSeen.users).sort((a, b) => b[1] - a[1]).slice(0, 20);
+      const liveNames = new Set();
+      for (const S of sessLive.values()) if (S.conns > 0 && S.name) liveNames.add(String(S.name).toLowerCase());
+      if (!entries.length) lines.push('• کاربران سایت: هنوز فعالیتی ثبت نشده');
+      for (const [k, ts] of entries) {
+        const prof = state.profiles[k];
+        lines.push('• ' + ((prof && prof.name) || k) + ': ' + faAgo(ts) + (liveNames.has(k) ? ' 🟢 (آنلاین)' : ''));
+      }
+      await tgReply(lines.join('\n'));
+      return true;
+    }
+    case '/devices': {
+      const devs = Object.values(state.devices).sort((a, b) => (b.approvedAt || 0) - (a.approvedAt || 0));
+      const pend = [...devReqs.values()].filter(r => r.status === 'pending');
+      const lines = ['📱 دستگاه‌های مورد اعتماد (' + faNum(devs.length) + '):'];
+      if (!devs.length) lines.push('  – هنوز دستگاهی ثبت نشده — از تنظیمات سایت «افزودن دستگاه» بزن.');
+      for (const d of devs) {
+        lines.push('  – ' + (d.label || 'نامشخص') + ' · ' + (d.name || '؟')
+          + ' · تایید: ' + faAgo(d.approvedAt || d.createdAt)
+          + ' · آخرین ورود: ' + (d.lastUsedAt ? faAgo(d.lastUsedAt) : 'هنوز نشده')
+          + ' · ' + d.id.slice(0, 8));
+        lines.push('    لغو: `/rdev' + d.id.slice(0, 8) + '`');
+      }
+      if (pend.length) {
+        lines.push('', '⏳ در انتظار تایید (' + faNum(pend.length) + '):');
+        for (const r of pend) lines.push('  – ' + (r.label || 'نامشخص') + ' · ' + (r.name || '؟') + ' · تا ' + faMin(Math.ceil((r.exp - Date.now()) / 60000)) + ' دقیقه دیگر');
+      }
+      await tgReply(lines.join('\n'));
       return true;
     }
     case '/name': {
@@ -2071,6 +2294,7 @@ async function handleCommand(msg, text) {
         const who = s.kind === 'claim' ? 'بدون رمز («' + (s.name || '؟') + '»' + (s.code ? ' · 🏷 ' + s.code : '') + ')'
           : s.kind === 'reentry' ? 'بازگشت خودکار (آی‌پی)' + (s.name ? ' · ' + s.name : '')
           : s.kind === 'finger' ? 'اثر انگشت («' + (s.name || '؟') + '»)'
+          : s.kind === 'device' ? 'دستگاه اعتمادشده («' + (s.name || '؟') + '»)'
           : 'با رمز' + (s.name ? ' · ' + s.name : '');
         lines.push('  – #' + s.sid + ' · ' + fmtClock(s.t) + ' · ' + who + ' · ' + (s.dev || 'دستگاه نامشخص') + ' · ' + (s.revoked ? '⛔ اخراج‌شده' : '✅ فعال'));
       }
@@ -2080,7 +2304,8 @@ async function handleCommand(msg, text) {
       if (!recent.length) lines.push('  – هنوز ورودی ثبت نشده');
       for (const L of recent) {
         lines.push('  – ' + fmtClock(L.t) + ' · ' + (L.kind === 'claim' ? 'بدون رمز («' + L.name + '»' + (L.code ? ' · 🏷 ' + L.code : '') + ')'
-          : L.kind === 'finger' ? 'اثر انگشت («' + L.name + '»)' : 'با رمز') + ' · IP ' + L.ip);
+          : L.kind === 'finger' ? 'اثر انگشت («' + L.name + '»)'
+          : L.kind === 'device' ? 'دستگاه اعتمادشده («' + L.name + '»)' : 'با رمز') + ' · IP ' + L.ip);
       }
       await tgReply(lines.join('\n'));
       return true;
@@ -2224,6 +2449,7 @@ async function handleMessage(msg) {
     })).catch(() => {});
     return;
   }
+  touchLastSeen('tg');   /* v29: the admin acted — surface it as last-seen on the site */
 
   try {
     if (msg.text && msg.text.startsWith('/')) {
@@ -2607,7 +2833,8 @@ function sessionCard(rec) {
     '',
     '\u{1F511} روش: ' + (rec.kind === 'claim' ? 'بدون رمز (تایید ادمین)'
       : rec.kind === 'reentry' ? 'بازگشت خودکار (همان آی\u200cپی، تا ۳۰۰ دقیقه)'
-      : rec.kind === 'finger' ? 'اثر انگشت (بدون تایپ رمز)' : 'رمز عبور'),
+      : rec.kind === 'finger' ? 'اثر انگشت (بدون تایپ رمز)'
+      : rec.kind === 'device' ? 'دستگاه اعتمادشده (قفل شخصی)' : 'رمز عبور'),
   ];
   if (rec.name) lines.push('\u{1F464} نام: ' + rec.name);
   if (rec.kind === 'claim') lines.push('\u{1F3F7} اسم رمز: ' + (rec.code || '-'));
@@ -3120,6 +3347,55 @@ const server = http.createServer(async (req, res) => {
         legacyName: (state.auth && state.auth.legacyName) || null });
     }
 
+    /* ---- v29 trusted-device login (public half): challenge + verify ----
+       The browser proves possession of the EC private key (wrapped under
+       the user's local pattern/PIN) over a single-use server nonce. */
+    if (u === '/api/device/challenge' && req.method === 'POST') {
+      if (ipBlock.has(ip)) return sendJson(res, 403, { error: 'forbidden' });
+      if (!statusRateOk(ip)) return sendJson(res, 429, { ok: false, error: 'تلاش‌ها زیاد بود' });
+      const body = await readJson(req, 2048).catch(() => ({}));
+      const devId = String(body.devId || '').toLowerCase().replace(/[^a-f0-9]/g, '').slice(0, 64);
+      const d = state.devices[devId];
+      if (!d || d.revoked) return sendJson(res, 404, { ok: false, error: 'این دستگاه مورد اعتماد نیست' });
+      const nonce = crypto.randomBytes(24).toString('base64url');
+      devChal.set(nonce, { devId, exp: Date.now() + 120000 });
+      return sendJson(res, 200, { ok: true, nonce, exp: Date.now() + 120000 });
+    }
+    if (u === '/api/device/login' && req.method === 'POST') {
+      if (ipBlock.has(ip)) return sendJson(res, 403, { error: 'forbidden' });
+      if (!loginGate(ip).ok) return sendJson(res, 429, { ok: false, error: 'قفل ورود فعال است' });
+      const body = await readJson(req, 8192).catch(() => ({}));
+      const deny = (msg) => { recordLoginFail(ip); log('device-login FAIL from', ip, msg || ''); return sendJson(res, 401, { ok: false, error: msg || 'ورود با دستگاه ناموفق بود' }); };
+      const devId = String(body.devId || '').toLowerCase().replace(/[^a-f0-9]/g, '').slice(0, 64);
+      const nonce = String(body.nonce || '');
+      const ch = devChal.get(nonce);
+      if (!ch || ch.devId !== devId || ch.exp < Date.now()) return deny('challenge');
+      devChal.delete(nonce);                       // single-use
+      const d = state.devices[devId];
+      if (!d || d.revoked) return deny('unknown device');
+      let jwk = null; try { jwk = JSON.parse(d.jwk); } catch {}
+      const sig = bufOf(String(body.sig || ''));
+      if (!jwk || !sig || !sig.length || !devVerify(jwk, Buffer.from(nonce, 'utf8'), sig)) return deny('signature');
+      if (authMode() !== 'new' || !state.vaultFallback) {
+        return sendJson(res, 409, { ok: false, error: 'کلید پشتیبان آماده نیست — یک بار با رمز وارد شوید' });
+      }
+      loginClear(ip);
+      d.lastUsedAt = Date.now();
+      d.ip = ip;
+      saveData();
+      log('device login OK from ' + ip + ' (' + (d.label || devId.slice(0, 8)) + ')');
+      noteLogin('device', ip, d.name);
+      const tok = makeToken();
+      const srec = registerSession(tok, 'device', { name: d.name, ip, dev: d.label || 'دستگاه اعتمادشده' });
+      if (srec) { srec.notified = true; reentryArm(ip, d.name); adminNotify(sessionCard(srec)).catch(() => {}); }
+      touchLastSeen(d.nameLower || d.name);
+      return sendJson(res, 200, { ok: true, tok, name: d.name, mode: 'device',
+        wrap: state.vaultFallback, fk: fbKekB64(),
+        legacyWrap: (state.auth && state.auth.legacyWrap) || null,
+        legacyTag: (state.auth && state.auth.legacyTag) || null,
+        legacyName: (state.auth && state.auth.legacyName) || null });
+    }
+
     /* ---- test-only hooks (never enabled in production) ---- */
     if (TEST_MODE && u.startsWith('/__test/')) {
       if (req.method !== 'POST') return sendJson(res, 405, {});
@@ -3205,6 +3481,15 @@ const server = http.createServer(async (req, res) => {
       if (u === '/__test/finger-state') {    // v27: inspect fingerprint state (tests only)
         return sendJson(res, 200, { ok: true, finger: state.finger, reqs: [...fingerReqs.values()].map(r => ({ id: r.id, name: r.name, status: r.status })) });
       }
+      if (u === '/__test/dev-decide') {      // v29: admin decision on a device request (tests only)
+        const r2 = resolveDeviceRequest(String(b.id || ''), b.decision === 'a' ? 'a' : 'd');
+        return sendJson(res, r2.code === 'ok' ? 200 : 409, { ok: r2.code });
+      }
+      if (u === '/__test/dev-state') {       // v29: inspect device state (tests only)
+        return sendJson(res, 200, { ok: true,
+          devices: Object.fromEntries(Object.entries(state.devices).map(([k, d]) => [k, { label: d.label, name: d.name, revoked: !!d.revoked, lastUsedAt: d.lastUsedAt }])),
+          reqs: [...devReqs.values()].map(r => ({ id: r.id, devId: r.devId, label: r.label, status: r.status })) });
+      }
       if (u === '/__test/authstate') {  // v18: migration state (v21: + rekey info)
         return sendJson(res, 200, { ok: true, mode: authMode(), hasPw: !!PASSWORD, hasLegacyWrap: !!(state.auth && state.auth.legacyWrap),
           hasFallback: !!(state.vaultFallback && state.vaultFallback.iv && state.vaultFallback.c),
@@ -3263,6 +3548,7 @@ const server = http.createServer(async (req, res) => {
           const devQ = new URL(req.url, 'http://x').searchParams.get('dev') || '';
           sessOpen(srec0, devQ, req.headers['user-agent']);
           reentryArm(ip, srec0 && srec0.name);   /* v24: keep the re-entry window alive while active */
+          touchLastSeen(srec0 && srec0.name);    /* v29: opening the chat counts as activity */
         } catch {}
         /* v19: a pending claim that still lacks its CK wrap is re-pushed to
            every fresh session — e.g. the first password login (migration)
@@ -3294,6 +3580,7 @@ const server = http.createServer(async (req, res) => {
           tgPersona: state.tgPersona,
           profiles: state.profiles,          // v18: per display-name profiles
           legacySender: state.legacySender,  // v18: label of pre-v18 site messages
+          lastSeen: { tg: state.lastSeen.tg || 0, users: state.lastSeen.users },  // v29
         });
       }
 
@@ -3328,6 +3615,7 @@ const server = http.createServer(async (req, res) => {
           t: null, meta: cleanMeta, reacts: null,
         });
         broadcast({ type: 'msg', m: publicMsg(m) });
+        touchLastSeen(cleanMeta.un || cleanMeta.name, (sessions.get(auth) || {}).name);   // v29
         return sendJson(res, 200, { id: m.id, ts: m.ts });
       }
 
@@ -3624,6 +3912,84 @@ const server = http.createServer(async (req, res) => {
         log('finger removed (by "' + (rec0 && rec0.name) + '")');
         adminNotify('\u{1F5D1} ورود با اثر انگشت غیرفعال شد (توسط «' + (rec0 && rec0.name || '?') + '»).').catch(() => {});
         broadcastSafe({ type: 'finger', status: 'removed' });
+        return sendJson(res, 200, { ok: true });
+      }
+
+      /* ---- v29 trusted device (authed): request / status / list / revoke ---- */
+      if (u === '/api/device/req' && req.method === 'POST') {
+        const rec0 = sessions.get(auth);
+        const nm = sanitizeName(rec0 && rec0.name);
+        if (!nm || nm.length < 2) return sendJson(res, 400, { ok: false, error: 'اول یک نام نمایشی در تنظیمات ذخیره کنید، بعد درخواست بدهید' });
+        if (authMode() !== 'new') return sendJson(res, 409, { ok: false, error: 'گاوصندوق هنوز به حالت صفر-دانش ارتقا نیافته است' });
+        if (!state.vaultFallback) return sendJson(res, 409, { ok: false, error: 'کلید پشتیبان آماده نیست — یک بار با رمز وارد شوید' });
+        const body = await readJson(req, 16 * 1024).catch(() => ({}));
+        const devId = String(body.devId || '').toLowerCase().replace(/[^a-f0-9]/g, '').slice(0, 64);
+        if (devId.length < 16) return sendJson(res, 400, { ok: false, error: 'شناسه دستگاه نامعتبر است' });
+        let pub = null;
+        try { pub = JSON.parse(String(body.pub || '')); } catch {}
+        if (!pub || pub.kty !== 'EC' || pub.crv !== 'P-256' || !pub.x || !pub.y)
+          return sendJson(res, 400, { ok: false, error: 'کلید عمومی نامعتبر است' });
+        const pubJwk = JSON.stringify({ kty: 'EC', crv: 'P-256', x: String(pub.x).slice(0, 64), y: String(pub.y).slice(0, 64) });
+        const label = devLabel(body.label) || 'دستگاه نامشخص';
+        const existing = state.devices[devId];
+        if (existing && !existing.revoked && existing.jwk === pubJwk)
+          return sendJson(res, 200, { ok: true, state: 'approved' });   // idempotent
+        if (existing && existing.revoked)
+          return sendJson(res, 403, { ok: false, state: 'revoked', error: 'اعتماد این دستگاه توسط ادمین لغو شده است' });
+        for (const r of devReqs.values()) if (r.status === 'pending' && r.devId === devId)
+          return sendJson(res, 200, { ok: true, state: 'pending', id: r.id, exp: r.exp });
+        const nl = nm.toLowerCase();
+        const rl = reqRateOk(ip);
+        if (!rl.ok) return sendJson(res, 429, { ok: false, error: 'تلاش‌ها زیاد بود — بعداً دوباره امتحان کنید' });
+        const dn = deny24.get(ip);
+        if (dn && Date.now() - dn < DENY_BLOCK_MS) return sendJson(res, 429, { ok: false, error: 'درخواست قبلی‌ات رد شد — بعداً امتحان کنید' });
+        const noBridge = !TG_TOKEN || !state.adminId;
+        if (noBridge && !TEST_MODE) return sendJson(res, 503, { ok: false, error: 'ربات تلگرام هنوز متصل نیست — با ادمین تماس بگیرید' });
+        const id = crypto.randomBytes(16).toString('hex');
+        const ua = devLabel(req.headers['user-agent']);
+        const rec = { id, devId, pub: pubJwk, label, name: nm, nameLower: nl, ua, ip,
+                      status: 'pending', ts: Date.now(), exp: Date.now() + REQ_TTL, msgId: null, cardText: '' };
+        if (!noBridge) {
+          try { await sendDeviceCard(rec); }
+          catch (e) { log('device card fail:', e.message); return sendJson(res, 502, { ok: false, error: 'ارسال درخواست به ربات ناموفق بود — دوباره تلاش کنید' }); }
+        }
+        devReqs.set(id, rec);
+        log('device-request ' + id.slice(0, 8) + '… "' + label + '" by "' + nm + '" from ' + ip);
+        return sendJson(res, 200, { ok: true, id, exp: rec.exp, state: 'pending' });
+      }
+      if (u === '/api/device/status' && req.method === 'POST') {
+        const body = await readJson(req, 2048).catch(() => ({}));
+        const devId = String(body.devId || '').toLowerCase().replace(/[^a-f0-9]/g, '').slice(0, 64);
+        if (!devId) return sendJson(res, 400, { ok: false, error: 'devId لازم است' });
+        const d = state.devices[devId];
+        if (d && !d.revoked) return sendJson(res, 200, { ok: true, state: 'approved', name: d.name, label: d.label, lastUsedAt: d.lastUsedAt, createdAt: d.createdAt });
+        if (d && d.revoked) return sendJson(res, 200, { ok: true, state: 'revoked' });
+        for (const r of devReqs.values()) {
+          if (r.devId !== devId) continue;
+          if (r.status === 'pending') return sendJson(res, 200, { ok: true, state: 'pending', exp: r.exp });
+          if (r.status === 'denied' && Date.now() - r.ts < DENY_BLOCK_MS) return sendJson(res, 200, { ok: true, state: 'denied' });
+        }
+        return sendJson(res, 200, { ok: true, state: 'none' });
+      }
+      if (u === '/api/devices' && req.method === 'GET') {
+        const list = Object.values(state.devices)
+          .sort((a, b) => (b.approvedAt || 0) - (a.approvedAt || 0))
+          .map(d => ({ devId: d.id, label: d.label, name: d.name, ip: d.ip,
+                       createdAt: d.createdAt, approvedAt: d.approvedAt, lastUsedAt: d.lastUsedAt, revoked: !!d.revoked }));
+        const pend = [...devReqs.values()].filter(r => r.status === 'pending')
+          .map(r => ({ id: r.id, label: r.label, name: r.name, exp: r.exp }));
+        return sendJson(res, 200, { ok: true, devices: list, pending: pend });
+      }
+      if (u === '/api/device/revoke' && req.method === 'POST') {
+        const body = await readJson(req, 2048).catch(() => ({}));
+        const devId = String(body.devId || '').toLowerCase().replace(/[^a-f0-9]/g, '').slice(0, 64);
+        const d = state.devices[devId];
+        if (!d) return sendJson(res, 404, { ok: false, error: 'دستگاه پیدا نشد' });
+        delete state.devices[devId];
+        saveData();
+        log('device revoked:', devId.slice(0, 8), 'by "' + (sessions.get(auth) || {}).name + '"');
+        adminNotify('\u{1F5D1} اعتماد دستگاه «' + (d.label || '?') + '» لغو شد — دیگر بدون رمز وارد نمی\u200cشود.').catch(() => {});
+        broadcastSafe({ type: 'device', devId, status: 'revoked' });
         return sendJson(res, 200, { ok: true });
       }
 

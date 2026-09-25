@@ -1510,3 +1510,24 @@ html[data-theme="light"] .claim-row input,html[data-theme="auto"] .claim-row inp
 .finger-txt{display:flex;flex-direction:column;gap:2px;min-width:0}
 .finger-txt b{font-size:13.5px}
 .finger-txt small{font-size:11.5px;color:var(--muted);line-height:1.6}
+
+/* v29 — pattern/PIN lock grid + trusted-device seen line */
+.pat-grid{
+  position:relative;width:216px;height:216px;margin:14px auto 4px;display:grid;
+  grid-template-columns:repeat(3,1fr);grid-template-rows:repeat(3,1fr);place-items:center;
+  touch-action:none;user-select:none;-webkit-user-select:none;cursor:pointer;
+}
+.pat-grid svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.pat-dot{
+  width:20px;height:20px;border-radius:50%;flex:none;
+  border:2px solid var(--muted-2);background:transparent;
+  transition:background .12s,border-color .12s,transform .12s;
+  display:block;padding:0;cursor:pointer;
+}
+.pat-dot.hit{background:var(--accent-deep);border-color:var(--accent);transform:scale(1.25)}
+.pat-dot.cur{border-color:var(--danger);transform:scale(1.35)}
+.dev-seen{font-size:11.5px;color:var(--muted);line-height:1.8;margin-top:10px;white-space:pre-line}
+.lock-type-row{margin-top:10px}
+.pop-seen{display:block;margin-top:4px;font-size:11.5px;color:var(--muted);line-height:1.7}
+.dev-btn{border-color:color-mix(in srgb,var(--ok) 45%,transparent);color:var(--ok);background:color-mix(in srgb,var(--ok) 9%,transparent)}
+.dev-btn:hover{background:color-mix(in srgb,var(--ok) 16%,transparent)}

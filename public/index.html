@@ -14,7 +14,7 @@
 <link rel="icon" type="image/png" href="/favicon.png?v=28">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="apple-touch-icon" href="/icon-192.png?v=28">
-<link rel="stylesheet" href="/style.css?v=28">
+<link rel="stylesheet" href="/style.css?v=29">
 </head>
 <body>
 
@@ -51,6 +51,10 @@
     </div>
 
     <button class="btn-main" id="enterBtn" type="submit">باز کردن قفل</button>
+    <button class="finger-btn dev-btn" id="devLoginBtn" type="button" hidden>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="6" y="2.5" width="12" height="19" rx="2.5"/><path d="M10 18.5h4"/></svg>
+      ورود با این دستگاه (بدون رمز)
+    </button>
     <button class="finger-btn" id="fingerLoginBtn" type="button" hidden>
       <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 11c0 3.2-.6 6.2-1.8 9"/><path d="M8.4 13.2c-.2 1.9-.7 3.8-1.5 5.6"/><path d="M15.7 12.6c.1 1.5.4 3 .8 4.4"/><path d="M12 4.5c-2.7 0-5.1 1.3-6.6 3.3"/><path d="M18.6 7.8A8 8 0 0 0 15.5 5.3"/><path d="M4.6 11.5c-.1 1.3-.3 2.6-.6 3.8"/><path d="M19.9 11.2c.1 2.2.5 4.3 1.2 6.3"/><path d="M12 7.5a4 4 0 0 1 4 4c0 .7 0 1.4-.1 2.1"/><path d="M8.1 12.3c-.1.9-.2 1.8-.4 2.7"/></svg>
       ورود با اثر انگشت
@@ -378,6 +382,30 @@
           <button class="mini-btn ghost" type="button" id="fingerRemoveBtn" hidden>غیرفعال‌سازی</button>
         </div>
       </div>
+      <div class="finger-box" id="devBox">
+        <div class="finger-row">
+          <span class="finger-ic" id="devIc">📱</span>
+          <div class="finger-txt"><b>دستگاه مورد اعتماد</b><small id="devStateTxt">در حال بررسی وضعیت…</small></div>
+        </div>
+        <div class="row-gap">
+          <button class="mini-btn" type="button" id="devReqBtn">درخواست اعتماد به این دستگاه</button>
+          <button class="mini-btn ghost" type="button" id="devRemoveBtn" hidden>لغو اعتماد</button>
+        </div>
+        <div class="row-gap" id="devNewRow" hidden>
+          <button class="mini-btn ghost" type="button" id="devNewBtn">این یک دستگاه جدید است (قفل قدیمی را فراموش کردم)</button>
+        </div>
+        <div class="dev-seen" id="devLastSeen"></div>
+      </div>
+      <div class="finger-box" id="lockBox">
+        <div class="finger-row">
+          <span class="finger-ic" id="lockIc">🔏</span>
+          <div class="finger-txt"><b>قفل شخصی</b><small id="lockStateTxt">الگو یا پین برای ورود بدون رمز</small></div>
+        </div>
+        <div class="row-gap">
+          <button class="mini-btn" type="button" id="lockSetBtn">تعیین قفل شخصی</button>
+          <button class="mini-btn ghost" type="button" id="lockClearBtn" hidden>حذف قفل</button>
+        </div>
+      </div>
     </section>
 
     <section class="sh-group">
@@ -394,6 +422,26 @@
   <div class="pop-avatar" id="ppAvatar">🛡</div>
   <b id="ppName">تلگرام</b>
   <small id="ppSub">پل ربات · پیام‌ها بدون رمزنگاری سرتاسری</small>
+  <small id="ppSeen" class="pop-seen"></small>
+</div>
+
+<!-- v29: trusted-device login (personal pattern/PIN lock) -->
+<div class="overlay" id="devLockOv" hidden>
+  <div class="dialog">
+    <h3 id="devLockTitle">🔏 قفل شخصی</h3>
+    <p id="devLockHint"></p>
+    <div class="pat-grid" id="patGrid" aria-label="الگوی قفل"></div>
+    <input class="gate-input" id="lockPinInput" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" placeholder="پین عددی (۸–۴ رقم)" hidden dir="ltr" autocomplete="off">
+    <div class="row-gap lock-type-row" id="lockTypeRow" hidden>
+      <button class="mini-btn" type="button" id="lockTypePat">الگو ✋</button>
+      <button class="mini-btn ghost" type="button" id="lockTypePin">پین عددی 🔢</button>
+    </div>
+    <div class="gate-msg" id="devLockMsg"></div>
+    <div class="dlg-actions">
+      <button class="btn-cancel" id="devLockCancel">انصراف</button>
+      <button class="btn-danger" id="devLockOk" hidden>تایید</button>
+    </div>
+  </div>
 </div>
 
 <div class="toasts" id="toasts"></div>
@@ -426,7 +474,7 @@
   <a class="lb-dl" id="lbDl" download="media" href="#">دانلود</a>
 </div>
 
-<script src="/emoji-data.js?v=28"></script>
-<script src="/app.js?v=28"></script>
+<script src="/emoji-data.js?v=29"></script>
+<script src="/app.js?v=29"></script>
 </body>
 </html>

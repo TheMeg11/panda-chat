@@ -412,6 +412,35 @@
   }
   const faNums = '۰۱۲۳۴۵۶۷۸۹';
   const faDigits = (s) => String(s).replace(/\d/g, d => faNums[+d]);
+  /* v29: Persian relative time («۳ دقیقه پیش») for real last-seen display */
+  function faAgo(ts) {
+    const t = Number(ts) || 0;
+    if (!t) return 'نامعلوم';
+    const d = Date.now() - t;
+    if (d < 0) return 'همین حالا';
+    if (d < 60 * 1000) return 'همین حالا';
+    const m = Math.floor(d / 60000);
+    if (m < 60) return faDigits(m) + ' دقیقه پیش';
+    const h = Math.floor(m / 60);
+    if (h < 24) return faDigits(h) + ' ساعت پیش';
+    const days = Math.floor(h / 24);
+    if (days === 1) return 'دیروز';
+    if (days < 7) return faDigits(days) + ' روز پیش';
+    try { return new Date(t).toLocaleDateString('fa-IR'); } catch { return ''; }
+  }
+  /* v29: real last-seen snapshots (from /api/history + presence events) */
+  const lastSeen = { tg: 0, users: {} };
+  function paintSeen() {
+    const el = $('ppSeen');
+    if (el) {
+      const on = lastPresence && lastPresence.tg;
+      el.textContent = 'آخرین فعالیت: ' + faAgo(lastSeen.tg)
+        + (on ? ' · آنلاین 🟢' : '');
+    }
+    const ds = $('devLastSeen');
+    if (ds && ds.dataset.html) ds.innerHTML = ds.dataset.html;
+  }
+  setInterval(() => { try { paintSeen(); } catch {} }, 60000);
 
   /* long-press (or right-click) on a gif/sticker in chat -> save to device */
   function saveMediaFromUrl(url, name, mime) {
@@ -1198,6 +1227,21 @@
           fingerRefresh();
           break;
         }
+        case 'device': {
+          /* v29: trusted-device lifecycle (approve/deny/revoke from Telegram) */
+          if (d.status === 'approved' && (!d.devId || d.devId === devIdGet()))
+            toast('📱 ادمین این دستگاه را تایید کرد — بدون رمز وارد شوید ✓', 'ok', 6000);
+          else if (d.status === 'denied' && (!d.devId || d.devId === devIdGet()))
+            toast('❌ درخواست اعتماد دستگاه توسط ادمین رد شد', 'err', 5000);
+          else if (d.status === 'revoked' && d.devId && d.devId === devIdGet()) {
+            try { localStorage.removeItem(DEV_PRIV_KEY); } catch {}
+            try { localStorage.removeItem(DEV_PUB_KEY); } catch {}
+            toast('⛔ اعتماد این دستگاه لغو شد', 'err', 5000);
+          } else if (d.status === 'revoked') toast('⛔ اعتماد یک دستگاه لغو شد');
+          try { devRefresh(); } catch {}
+          try { updDevGateBtn(); } catch {}
+          break;
+        }
         case 'title': {
           /* v15: admin changed the brand with /title — apply live */
           if (d.title) { applyTitle(d.title); toast('عنوان سایت: ' + d.title); }
@@ -1214,6 +1258,7 @@
         case 'presence':
           adminLinked = d.adminLinked !== undefined ? d.adminLinked : adminLinked;
           lastPresence = d;
+          if (d.tgSeen) { lastSeen.tg = d.tgSeen; paintSeen(); }   /* v29: live TG last-seen */
           composeStatus(d);
           $('presenceDot').classList.toggle('on', (d.n || 0) >= 2);
           break;
@@ -1304,6 +1349,11 @@
       $('presenceDot').classList.toggle('on', (h.presence && h.presence.n >= 2));
       adminLinked = !!(h.presence && h.presence.tg) || adminLinked;
       composeStatus(h.presence);
+      if (h.lastSeen) {                        /* v29: real snapshots — refresh popover */
+        if (h.lastSeen.tg) lastSeen.tg = h.lastSeen.tg;
+        if (h.lastSeen.users) lastSeen.users = h.lastSeen.users;
+        paintSeen();
+      }
       scrollDown(initial);
       setTimeout(() => scrollDown(false), 350);
     } catch {}
@@ -1330,6 +1380,7 @@
     if ($('ppSub')) $('ppSub').textContent = bridgeOn
       ? 'پل ربات تلگرام فعال · پیام‌های تلگرامی رمزنگاری سرتاسری ندارند'
       : 'پل ربات غیرفعال';
+    paintSeen();   /* v29: live last-seen line under the peer sub */
     applyPeerPopAvatar();
   }
   async function loadTgPhoto() {
@@ -2655,7 +2706,353 @@
   setSheet.addEventListener('click', (e) => {
     if (e.target === setSheet) saveProfile().finally(() => setSheet.classList.remove('on'));
   });
-  $('mSettings').onclick = () => { closeMenus(); syncSettingsUI(); setSheet.classList.add('on'); uiGuardPush(); fingerRefresh(); };
+  $('mSettings').onclick = () => { closeMenus(); syncSettingsUI(); setSheet.classList.add('on'); uiGuardPush(); fingerRefresh(); devRefresh(); lockRefresh(); };
+
+  /* ============================================================
+     v29 دستگاه مورد اعتماد + قفل شخصی (الگو/پین)
+     Design:
+       · هر مرورگر یک EC P-256 keypair می‌سازد؛ نیمی عمومی (pub) به سرور
+         می‌رود (پس از تایید ادمین در تلگرام) و نیمهٔ خصوصی (priv) فقط در
+         localStorage همین گوشی می‌ماند — و همیشه زیر قفل شخصی (الگو یا
+         پین، PBKDF2→AES-GCM) رمزشده است.
+       · ورود بدون رمز: قفل باز می‌شود → کلید خصوصی رمزگشایی → چالش سرور
+         امضا می‌شود → نشست + wrap کلید چت. فراموشی قفل = ورود با رمز اصلی.
+     ============================================================ */
+  const DEV_ID_KEY = 'vault_devid', DEV_PUB_KEY = 'vault_devpub', DEV_PRIV_KEY = 'vault_devpriv';
+  const DEV_LOCK_KEY = 'vault_devlock';
+  function devIdGet() {
+    let id = '';
+    try { id = localStorage.getItem(DEV_ID_KEY) || ''; } catch {}
+    if (!/^[a-f0-9]{32}$/.test(id)) {
+      id = Array.from(crypto.getRandomValues(new Uint8Array(16)), x => x.toString(16).padStart(2, '0')).join('');
+      try { localStorage.setItem(DEV_ID_KEY, id); } catch {}
+    }
+    return id;
+  }
+  function devLockGet() {
+    try { return JSON.parse(localStorage.getItem(DEV_LOCK_KEY) || 'null'); } catch { return null; }
+  }
+  function lockHas() { const L = devLockGet(); return !!(L && L.k && L.n && (L.t === 'pat' || L.t === 'pin')); }
+  async function lockKek(secret, saltB64) {
+    return hkdfWrapKey(await pbkdf2Raw(secret, saltB64, 250000), 'dev-lock-v1');
+  }
+  async function lockSeal(secret, type, privJwkObj) {
+    /* wrap the EC private JWK under the user's personal lock (fresh salts/iv) */
+    const s1 = b64.enc(crypto.getRandomValues(new Uint8Array(16)));
+    const s2 = b64.enc(crypto.getRandomValues(new Uint8Array(16)));
+    const kek = await lockKek(secret + '￨' + s1, s2);
+    const w = await aesEnc(kek, te.encode(JSON.stringify(privJwkObj)));
+    return { v: 1, t: type, k: s1, n: s2, iv: w.iv, c: w.c };
+  }
+  async function lockOpen(secret) {
+    /* returns the unwrapped EC private JWK object, or throws on a wrong lock */
+    const L = devLockGet();
+    if (!L || !L.k || !L.n || !L.iv || !L.c) throw new Error('no-lock');
+    const kek = await lockKek(secret + '￨' + L.k, L.n);
+    const raw = await aesDec(kek, L.iv, L.c);
+    return JSON.parse(td.decode(raw));
+  }
+  async function devPubOnly() {
+    try { return JSON.parse(localStorage.getItem(DEV_PUB_KEY) || 'null'); } catch { return null; }
+  }
+  function devHasKeys() {
+    try { return !!(localStorage.getItem(DEV_PRIV_KEY) && localStorage.getItem(DEV_PUB_KEY)); } catch { return false; }
+  }
+  async function devRefresh() {
+    try {
+      const tx = $('devStateTxt'), ic = $('devIc'), rq = $('devReqBtn'), rm = $('devRemoveBtn'), nw = $('devNewRow'), ds = $('devLastSeen');
+      if (!tx) return;
+      const j = await (await API('/api/devices', { method: 'GET' })).json().catch(() => ({}));
+      const mine = devIdGet();
+      const devs = (j && j.devices) || [];
+      const own = devs.find(d => d.devId === mine);
+      const pend = ((j && j.pending) || []).filter(p => (p.name || '').toLowerCase() === (prefs.name || '').toLowerCase());
+      const hasLoc = devHasKeys() || lockHas();
+      if (own) {
+        ic.textContent = '✅';
+        rq.hidden = true; rm.hidden = false; nw.hidden = true;
+        tx.textContent = 'این دستگاه مورد اعتماد است ✓ — با «ورود با این دستگاه» بدون رمز وارد می‌شوید.';
+        const seen = 'آخرین ورود با این دستگاه: ' + faAgo(own.lastUsedAt);
+        if (ds) { ds.textContent = seen; ds.dataset.html = ''; }
+      } else if (hasLoc && pend.length) {
+        ic.textContent = '⏳';
+        rq.hidden = false; rq.textContent = 'در انتظار تایید ادمین…'; rq.disabled = true;
+        rm.hidden = false; nw.hidden = true;
+        tx.textContent = 'درخواست به ربات رفت — در تلگرام با ✅ تایید کنید.';
+      } else if (hasLoc) {
+        ic.textContent = '📱';
+        rq.hidden = false; rq.textContent = 'درخواست اعتماد به این دستگاه'; rq.disabled = false;
+        rm.hidden = false; nw.hidden = true;
+        tx.textContent = 'کلید این دستگاه آماده است — درخواست را بفرستید تا ادمین تایید کند.';
+      } else {
+        ic.textContent = '📱';
+        rq.hidden = false; rq.textContent = 'درخواست اعتماد به این دستگاه'; rq.disabled = false;
+        rm.hidden = true; nw.hidden = true;
+        tx.textContent = lockHas() ? 'قفل شخصی فعال است — حالا اعتماد این دستگاه را درخواست کنید.'
+          : 'بدون رمز وارد شوید: اول قفل شخصی (الگو/پین) تعیین کنید، بعد اعتماد دستگاه را بخواهید.';
+      }
+      if (ds && !own) { ds.textContent = ''; ds.dataset.html = ''; }
+    } catch { /* sheet closed / offline — retry on next open */ }
+  }
+  /* ---- v29 lock overlay: shared pattern-grid + PIN pad ----
+     Modes (set by the caller through lockUi.onDone):
+       'unlock' — verify existing lock, then onDone(secret)
+       'setup'  — pick type, enter twice, then onDone(secret, type)   */
+  const lockUi = { onDone: null, mode: 'unlock', type: 'pat', first: null, cur: [], fails: 0 };
+  function patReset() {
+    lockUi.cur = [];
+    const g = $('patGrid');
+    if (!g) return;
+    g.innerHTML = '';
+    const NS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 100 100');
+    svg.id = 'patSvg';
+    g.appendChild(svg);
+    for (let i = 0; i < 9; i++) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'pat-dot'; b.dataset.i = String(i);
+      b.setAttribute('aria-label', 'نقطه ' + (i + 1));
+      g.appendChild(b);
+    }
+  }
+  function patDotCenter(i) {
+    const g = $('patGrid');
+    const b = g && g.querySelector('[data-i="' + i + '"]');
+    if (!b || !g) return null;
+    const gr = g.getBoundingClientRect(), br = b.getBoundingClientRect();
+    return { x: (br.left + br.width / 2 - gr.left) / gr.width * 100, y: (br.top + br.height / 2 - gr.top) / gr.height * 100 };
+  }
+  function patPaint(extra) {
+    const svg = $('patSvg');
+    if (!svg) return;
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    const NS = 'http://www.w3.org/2000/svg';
+    const pts = lockUi.cur.map(patDotCenter).filter(Boolean);
+    if (extra) pts.push(extra);
+    const g = $('patGrid');
+    (g ? Array.from(g.querySelectorAll('.pat-dot')) : []).forEach(d => {
+      d.classList.toggle('hit', lockUi.cur.indexOf(+d.dataset.i) >= 0);
+    });
+    for (let i = 1; i < pts.length; i++) {
+      const ln = document.createElementNS(NS, 'line');
+      ln.setAttribute('x1', pts[i - 1].x); ln.setAttribute('y1', pts[i - 1].y);
+      ln.setAttribute('x2', pts[i].x); ln.setAttribute('y2', pts[i].y);
+      ln.setAttribute('stroke', '#6cb2f0'); ln.setAttribute('stroke-width', '3.2');
+      ln.setAttribute('stroke-linecap', 'round'); ln.setAttribute('opacity', '.9');
+      svg.appendChild(ln);
+    }
+  }
+  function patAdd(i) {
+    if (lockUi.cur.indexOf(i) >= 0) return;
+    lockUi.cur.push(i);
+    if (navigator.vibrate) { try { navigator.vibrate(8); } catch {} }
+    patPaint();
+  }
+  function lockMsg(t, err) {
+    const m = $('devLockMsg');
+    if (!m) return;
+    m.textContent = t || ''; m.classList.toggle('err', !!err);
+  }
+  function lockShow(mode, hint) {
+    lockUi.mode = mode; lockUi.first = null; lockUi.fails = 0;
+    lockMsg('');
+    $('devLockTitle').textContent = mode === 'setup' ? '🔏 تعیین قفل شخصی' : '🔏 قفل شخصی';
+    $('devLockHint').textContent = hint || (mode === 'setup' ? 'اول نوع قفل را انتخاب کنید' : 'برای ورود، قفل شخصی را وارد کنید');
+    const L = devLockGet();
+    const savedType = (L && (L.t === 'pat' || L.t === 'pin')) ? L.t : 'pat';
+    lockUi.type = mode === 'setup' ? 'pat' : savedType;
+    $('lockTypeRow').hidden = mode !== 'setup';
+    $('lockPinInput').hidden = (mode === 'setup') || lockUi.type !== 'pin';
+    $('lockPinInput').value = '';
+    $('patGrid').hidden = lockUi.type !== 'pat';
+    $('devLockOk').hidden = lockUi.type !== 'pin';
+    patReset();
+    $('devLockOv').hidden = false;
+    if (mode !== 'setup' && lockUi.type === 'pin') setTimeout(() => { try { $('lockPinInput').focus(); } catch {} }, 60);
+  }
+  function lockHide() { $('devLockOv').hidden = true; lockUi.onDone = null; }
+  function lockSubmitPat() {
+    const seq = lockUi.cur.join(',');
+    if (lockUi.cur.length < 4) { lockMsg('الگو باید حداقل ۴ نقطه باشد', true); return; }
+    if (lockUi.mode === 'setup') { lockSetupStep('pat:' + seq); return; }
+    lockUnlockStep('pat:' + seq);
+  }
+  function lockSetupStep(secret) {
+    if (!lockUi.first) {
+      lockUi.first = secret; patReset(); $('lockPinInput').value = '';
+      $('devLockHint').textContent = lockUi.type === 'pat' ? 'یک بار دیگر همان الگو را بکشید' : 'یک بار دیگر همان پین را وارد کنید';
+      lockMsg(''); return;
+    }
+    if (secret !== lockUi.first) {
+      lockUi.first = null; patReset(); $('lockPinInput').value = '';
+      lockMsg('یکسان نبود — دوباره از اول', true); return;
+    }
+    const cb = lockUi.onDone; lockHide();
+    if (cb) { try { cb(secret, lockUi.type); } catch {} }
+  }
+  async function lockUnlockStep(secret) {
+    try {
+      await lockOpen(secret);
+      lockUi.fails = 0;
+      const cb = lockUi.onDone; lockHide();
+      if (cb) { try { await cb(secret); } catch {} }
+    } catch {
+      lockUi.fails++;
+      patReset(); $('lockPinInput').value = '';
+      lockMsg(lockUi.fails >= 3 ? 'اشتباه است — اگر یادت نیست با رمز اصلی وارد شو' : 'اشتباه است — دوباره', true);
+    }
+  }
+  function lockSubmitPin() {
+    const v = $('lockPinInput').value.replace(/\D/g, '').slice(0, 8);
+    if (!/^[0-9]{4,8}$/.test(v)) { lockMsg('پین باید ۴ تا ۸ رقم باشد', true); return; }
+    if (lockUi.mode === 'setup') { lockSetupStep('pin:' + v); return; }
+    lockUnlockStep('pin:' + v);
+  }
+  function lockSetType(t) {
+    lockUi.type = t; lockUi.first = null; lockMsg('');
+    $('patGrid').hidden = t !== 'pat';
+    $('lockPinInput').hidden = t !== 'pin';
+    $('lockPinInput').value = '';
+    $('devLockOk').hidden = t !== 'pin';
+    $('devLockHint').textContent = t === 'pat'
+      ? 'الگو را بکشید (حداقل ۴ نقطه)، بعد دوباره تکرار کنید'
+      : 'یک پین ۴ تا ۸ رقمی وارد کنید، بعد دوباره تکرار کنید';
+    patReset();
+  }
+  /* pattern drag: pointer capture on the grid, dots light up as the finger passes */
+  (function patBind() {
+    const g = $('patGrid');
+    if (!g) return;
+    let drawing = false;
+    const idxAt = (cx, cy) => {
+      const dots = g.querySelectorAll('.pat-dot');
+      for (const d of dots) {
+        const r = d.getBoundingClientRect();
+        const rad = Math.max(22, r.width);
+        if (Math.abs(cx - (r.left + r.width / 2)) < rad && Math.abs(cy - (r.top + r.height / 2)) < rad) return +d.dataset.i;
+      }
+      return -1;
+    };
+    const posPct = (cx, cy) => {
+      const gr = g.getBoundingClientRect();
+      return { x: (cx - gr.left) / gr.width * 100, y: (cy - gr.top) / gr.height * 100 };
+    };
+    g.addEventListener('pointerdown', (e) => {
+      if ($('devLockOv').hidden || g.hidden) return;
+      drawing = true;
+      try { g.setPointerCapture(e.pointerId); } catch {}
+      const i = idxAt(e.clientX, e.clientY);
+      if (i >= 0) patAdd(i);
+      e.preventDefault();
+    });
+    g.addEventListener('pointermove', (e) => {
+      if (!drawing) return;
+      const i = idxAt(e.clientX, e.clientY);
+      if (i >= 0) patAdd(i);
+      else patPaint(posPct(e.clientX, e.clientY));
+    });
+    const end = (e) => {
+      if (!drawing) return;
+      drawing = false;
+      patPaint();
+      if (lockUi.cur.length) setTimeout(lockSubmitPat, 180);
+    };
+    g.addEventListener('pointerup', end);
+    g.addEventListener('pointercancel', () => { drawing = false; patPaint(); });
+  })();
+  $('lockTypePat').onclick = () => lockSetType('pat');
+  $('lockTypePin').onclick = () => lockSetType('pin');
+  $('devLockOk').onclick = lockSubmitPin;
+  $('lockPinInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); lockSubmitPin(); } });
+  $('devLockCancel').onclick = lockHide;
+
+  /* ---- trusted-device enrollment / removal (settings) ---- */
+  async function devEnsureKeys(secret, type) {
+    /* keypair for THIS browser (generated once, stored under the personal lock) */
+    let pub = await devPubOnly(), priv = null;
+    try { priv = JSON.parse(localStorage.getItem(DEV_PRIV_KEY) || 'null'); } catch { priv = null; }
+    if (pub && pub.kty === 'EC' && priv && priv.d) return { pub, fresh: false };
+    const kp = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+    pub = await crypto.subtle.exportKey('jwk', kp.publicKey);
+    priv = await crypto.subtle.exportKey('jwk', kp.privateKey);
+    pub = { kty: 'EC', crv: 'P-256', x: pub.x, y: pub.y };
+    try {
+      localStorage.setItem(DEV_PUB_KEY, JSON.stringify(pub));
+      localStorage.setItem(DEV_PRIV_KEY, JSON.stringify(priv));
+      try { localStorage.setItem(DEV_LOCK_KEY, JSON.stringify(await lockSeal(secret, type, priv))); } catch {}
+    } catch {}
+    return { pub, fresh: true };
+  }
+  let devBusy = false;
+  $('devReqBtn').onclick = async () => {
+    if (devBusy) return;
+    const locked = lockHas();
+    const go = async (secret, type) => {
+      devBusy = true;
+      try {
+        const { pub } = await devEnsureKeys(secret, type);
+        const r = await API('/api/device/req', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ devId: devIdGet(), pub: JSON.stringify(pub), label: deviceLabel() }) });
+        const j = await r.json().catch(() => ({}));
+        if (j.ok && j.state === 'approved') toast('این دستگاه از قبل مورد اعتماد است ✓', 'ok');
+        else if (j.ok) toast('درخواست اعتماد به ربات رفت 📱 — در تلگرام با ✅ تایید کنید', 'ok', 6000);
+        else toast(j.error || 'درخواست ناموفق بود', 'err', 5000);
+      } catch { toast('خطای شبکه', 'err'); }
+      devBusy = false;
+      devRefresh(); lockRefresh(); updDevGateBtn();
+    };
+    if (locked) {
+      lockUi.onDone = (secret) => go(secret, (devLockGet() || {}).t || 'pat');
+      lockShow('unlock', 'برای اعتماد به این دستگاه، قفل شخصی را وارد کنید');
+    } else {
+      lockUi.onDone = (secret, type) => go(secret, type);
+      lockShow('setup');
+    }
+  };
+  $('devRemoveBtn').onclick = () => {
+    confirmDialog('لغو اعتماد این دستگاه؟', 'بعد از این، ورود بدون رمز از این گوشی ممکن نخواهد بود؛ کلید دستگاه هم پاک می‌شود.', 'لغو اعتماد', async () => {
+      try {
+        await API('/api/device/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ devId: devIdGet() }) }).catch(() => {});
+      } catch {}
+      try { localStorage.removeItem(DEV_PRIV_KEY); } catch {}
+      try { localStorage.removeItem(DEV_PUB_KEY); } catch {}
+      toast('اعتماد این دستگاه لغو شد');
+      devRefresh(); updDevGateBtn();
+    });
+  };
+  $('lockSetBtn').onclick = () => {
+    lockUi.onDone = async (secret, type) => {
+      try {
+        /* re-wrap the existing device key under the new lock (fresh salts) */
+        let priv = null;
+        try { priv = JSON.parse(localStorage.getItem(DEV_PRIV_KEY) || 'null'); } catch { priv = null; }
+        if (!priv || !priv.d) {
+          const kp = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+          priv = await crypto.subtle.exportKey('jwk', kp.privateKey);
+          const pub = await crypto.subtle.exportKey('jwk', kp.publicKey);
+          try {
+            localStorage.setItem(DEV_PRIV_KEY, JSON.stringify(priv));
+            localStorage.setItem(DEV_PUB_KEY, JSON.stringify({ kty: 'EC', crv: 'P-256', x: pub.x, y: pub.y }));
+          } catch {}
+        }
+        try { localStorage.setItem(DEV_LOCK_KEY, JSON.stringify(await lockSeal(secret, type, priv))); } catch {}
+        toast('قفل شخصی فعال شد 🔏', 'ok');
+      } catch { toast('ثبت قفل ناموفق بود', 'err'); }
+      devRefresh(); lockRefresh(); updDevGateBtn();
+    };
+    lockShow('setup');
+  };
+  $('lockClearBtn').onclick = () => {
+    confirmDialog('حذف قفل شخصی؟', 'ورود بدون رمز از این گوشی غیرفعال می‌شود (کلید دستگاه پاک می‌شود).', 'حذف قفل', () => {
+      try { localStorage.removeItem(DEV_LOCK_KEY); } catch {}
+      try { localStorage.removeItem(DEV_PRIV_KEY); } catch {}
+      try { localStorage.removeItem(DEV_PUB_KEY); } catch {}
+      toast('قفل شخصی حذف شد');
+      devRefresh(); lockRefresh(); updDevGateBtn();
+    });
+  };
 
   /* ============================================================
      v27 ورود با اثر انگشت (settings half)
@@ -3561,6 +3958,60 @@
   const fingerGateBtnEl = $('fingerLoginBtn');
   if (fingerGateBtnEl) fingerGateBtnEl.onclick = fingerLogin;
 
+  /* ---- v29 passwordless login from a trusted device (gate) ---- */
+  function updDevGateBtn() {
+    const b = $('devLoginBtn');
+    if (!b) return;
+    b.hidden = !(lockHas() && devHasKeys());
+  }
+  async function devGateEnter(secret) {
+    const btn = $('devLoginBtn');
+    btn.disabled = true;
+    $('gateMsg').classList.remove('err');
+    $('gateMsg').textContent = 'در حال ورود با این دستگاه…';
+    try {
+      const priv = await lockOpen(secret);
+      const c0 = await fetchRetry('/api/device/challenge', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ devId: devIdGet() }) }, 2);
+      const ch = await c0.json().catch(() => ({}));
+      if (!c0.ok || !ch.ok || !ch.nonce) {
+        if (c0.status === 404) {
+          try { localStorage.removeItem(DEV_PRIV_KEY); } catch {}
+          try { localStorage.removeItem(DEV_PUB_KEY); } catch {}
+          updDevGateBtn(); devRefresh();
+          throw new Error('اعتماد این دستگاه لغو شده — با رمز وارد شوید');
+        }
+        throw new Error(ch.error || 'چالش ناموفق بود');
+      }
+      const key = await crypto.subtle.importKey('jwk', priv, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+      const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, te.encode(ch.nonce));
+      const r = await fetchRetry('/api/device/login', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ devId: devIdGet(), nonce: ch.nonce, sig: b64uEnc(sig) }) }, 2);
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok || !j.tok || !j.wrap || !j.fk) throw new Error(j.error || 'ورود با دستگاه ناموفق بود');
+      const fkKey = await crypto.subtle.importKey('raw', b64.dec(j.fk), { name: 'AES-GCM' }, false, ['decrypt']);
+      const ckRaw = await aesDec(fkKey, j.wrap.iv, j.wrap.c);
+      tok = j.tok; sessionStorage.setItem('vault_tok', tok);
+      aesKey = await importAesRaw(ckRaw);
+      if (j.legacyWrap) { try { legacyKey = await importAesRaw(await aesDec(aesKey, j.legacyWrap.iv, j.legacyWrap.c)); } catch {} }
+      myTag = localStorage.getItem('vault_tag') || rndTag();
+      localStorage.setItem('vault_tag', myTag);
+      myFp = await ckFingerprint(ckRaw);
+      if (j.name) { prefs.name = j.name; localStorage.setItem('vault_displayName', prefs.name); state.sitePersona.name = prefs.name; }
+      sessionStorage.removeItem('vault_recid');
+      saveSession({ ck: b64.enc(ckRaw), legacyWrap: j.legacyWrap || null });
+      toast('📱 ورود با این دستگاه انجام شد — بدون رمز', 'ok', 4200);
+      startApp();
+    } catch (e) {
+      showGateError((e && e.message) || 'ورود با دستگاه ناموفق بود');
+      btn.disabled = false;
+    }
+  }
+  $('devLoginBtn').onclick = () => {
+    lockUi.onDone = (secret) => devGateEnter(secret);
+    lockShow('unlock', 'برای ورود بدون رمز، قفل شخصی را وارد کنید');
+  };
+
   /* v24: passwordless re-entry — same IP within 300 minutes of the last
      session enters with zero typing (server hands out the fallback wrap) */
   async function tryReentry() {
@@ -3625,6 +4076,7 @@
     });
   }
   /* v15: pull the live brand (/title) even before login */
+  updDevGateBtn();   /* v29: show the trusted-device button when a sealed key exists */
   fetch('/api/health', { cache: 'no-store' }).then(r => r.ok ? r.json() : null).then(j => {
     if (j && j.title) applyTitle(j.title);
     if (j && j.finger) fingerGateBtn(true);   /* v27: show the fingerprint login button */
