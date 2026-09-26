@@ -568,15 +568,27 @@ http.ServerResponse.prototype.writeHead = function (code, ...args) {
   return _writeHead.apply(this, [code, ...args]);
 };
 
-/* --- v18 CORS: same-origin only — any cross-origin /api request is rejected --- */
+/* --- v18 CORS: same-origin only — any cross-origin /api request is rejected ---
+   v30 fix: the browser's Origin is also compared against the Host the request
+   actually reached (proxy-aware via x-forwarded-host), so login works on ANY
+   domain — *.up.railway.app, custom domains, render.com, … — with zero config.
+   Genuine cross-origin requests (Origin host ≠ Host header and not allow-listed)
+   are still hard-rejected with 403. */
 function corsAllowed(req) {
-  const o = req.headers.origin;
+  const o = String(req.headers.origin || '');
   if (!o) return true;                       // same-origin fetch/SSE usually has no Origin on GET
-  const dom = String(process.env.RAILWAY_PUBLIC_DOMAIN || '');
+  let oh = '';
+  try { oh = new URL(o).host.toLowerCase().replace(/:443$/, ''); } catch { return false; }
+  if (!oh) return false;
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '')
+    .split(',')[0].trim().toLowerCase().replace(/:443$/, '');
+  if (host && oh === host) return true;      // true same-origin — works on any domain
+  const dom = String(process.env.RAILWAY_PUBLIC_DOMAIN || '').trim().toLowerCase()
+    .replace(/^https?:\/\//, '').replace(/\/+$/, '');
   const ok = new Set(['https://vault.texastudio.ir']);
   if (dom) ok.add('https://' + dom);
   if (TEST_MODE && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(o)) ok.add(o);
-  return ok.has(o);
+  return ok.has(o.toLowerCase());
 }
 
 /* --- v18 SSE stream tickets: the session token never appears in any URL --- */
@@ -1711,7 +1723,7 @@ async function bridgeInMedia(kind, fileRef, msg, extra) {
 }
 
 /* ------------------------- disk monitor (Railway disk guard) ------------------------- */
-const VERSION = 'v29';
+const VERSION = 'v30';
 const bootAt = Date.now();
 
 /* ---------------- v24 passwordless re-entry (same IP, 300 min) ----------------
