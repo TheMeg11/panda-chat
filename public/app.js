@@ -32,11 +32,11 @@
   };
   const WALL_PRESETS = [
     '',
-    'linear-gradient(135deg,#123,#0e1621 60%,#20304a)',
-    'linear-gradient(160deg,#efe7d8,#dccfb9)',
-    'linear-gradient(145deg,#1c2733,#28425e)',
-    'radial-gradient(900px at 30% 20%, #26405c, #0d141d)',
-    'linear-gradient(150deg,#22343c,#101820)',
+    'linear-gradient(135deg,#3a2440,#241a2e 60%,#4a2c48)',
+    'linear-gradient(160deg,#ffe4f0,#ffd0e6)',
+    'linear-gradient(145deg,#382848,#5c3160)',
+    'radial-gradient(900px at 30% 20%, #7a3f64, #241a2e)',
+    'linear-gradient(150deg,#fdeef6,#ffd8ea)',
   ];
 
   function applyPrefs() {
@@ -44,7 +44,7 @@
     const meta = document.querySelector('meta[name=theme-color]');
     const mq = matchMedia('(prefers-color-scheme: dark)');
     const dark = prefs.theme === 'dark' || (prefs.theme === 'auto' && mq.matches);
-    if (meta) meta.content = dark ? '#0e1621' : '#e8edf3';
+    if (meta) meta.content = dark ? '#241a2e' : '#fdf1f6';
     if (prefs.font === 'system') {
       document.documentElement.style.setProperty('--app-font', "system-ui,-apple-system,'Segoe UI',Tahoma,sans-serif");
     } else {
@@ -2838,7 +2838,7 @@
       const ln = document.createElementNS(NS, 'line');
       ln.setAttribute('x1', pts[i - 1].x); ln.setAttribute('y1', pts[i - 1].y);
       ln.setAttribute('x2', pts[i].x); ln.setAttribute('y2', pts[i].y);
-      ln.setAttribute('stroke', '#6cb2f0'); ln.setAttribute('stroke-width', '3.2');
+      ln.setAttribute('stroke', '#ec6fa8'); ln.setAttribute('stroke-width', '3.2');
       ln.setAttribute('stroke-linecap', 'round'); ln.setAttribute('opacity', '.9');
       svg.appendChild(ln);
     }

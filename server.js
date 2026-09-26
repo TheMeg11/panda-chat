@@ -2910,7 +2910,7 @@ const server = http.createServer(async (req, res) => {
         description: '\u06AF\u0641\u062A\u200C\u0648\u06AF\u0648\u06CC \u0631\u0645\u0632\u0634\u062F\u0647 \u0628\u0627 \u067E\u0644 \u062A\u0644\u06AF\u0631\u0627\u0645 \u2014 \u0631\u0645\u0632\u0646\u06AF\u0627\u0631\u06CC AES-256 \u0633\u0645\u062A \u0645\u0631\u0648\u0631\u06AF\u0631',
         lang: 'fa', dir: 'rtl', start_url: '/', scope: '/', display: 'standalone',
         display_override: ['standalone', 'minimal-ui'], orientation: 'portrait-primary',
-        background_color: '#0e1621', theme_color: '#17212b',
+        background_color: '#241a2e', theme_color: '#302340',
         categories: ['social', 'communication', 'security'],
         icons: [
           { src: '/icon-192.png?v=' + VERSION, sizes: '192x192', type: 'image/png', purpose: 'any' },
