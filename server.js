@@ -44,9 +44,9 @@ let PASSWORD_HASH = String(process.env.PASSWORD_HASH || '');
 
 const TG_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || '');
 const RAILWAY_API_TOKEN = String(process.env.RAILWAY_API_TOKEN || '');
-const R_PID = String(process.env.RAILWAY_PROJECT_ID || '79d92c73-9f88-44c1-9559-65a8dc457287');
-const R_EID = String(process.env.RAILWAY_ENVIRONMENT_ID || 'eb7092d3-d978-465e-b3f5-344d6f0fc22f');
-const R_SID = String(process.env.RAILWAY_SERVICE_ID || '006d95ab-2d53-48a8-86fd-9fe149316bd3');
+const R_PID = String(process.env.RAILWAY_PROJECT_ID || '');
+const R_EID = String(process.env.RAILWAY_ENVIRONMENT_ID || '');
+const R_SID = String(process.env.RAILWAY_SERVICE_ID || '');
 
 const MAX_JSON_BODY = 512 * 1024;         // json endpoints
 const MAX_TEXT_CIPHER = 64 * 1024;        // ciphertext ceiling for text bodies
@@ -810,7 +810,11 @@ async function railGraphql(query, variables) {
 }
 const railCache = new Map(); // dedupe rapid identical writes
 function persistRailway(varsObj) {
-  if (!RAILWAY_API_TOKEN) return Promise.resolve(false);
+  /* real fix: never fall back to baked-in project/environment/service IDs —
+     those belonged to a different Railway project entirely (leftover from
+     the original developer's own deploy). Only sync if THIS deployment's
+     own Railway-injected IDs are present. */
+  if (!RAILWAY_API_TOKEN || !R_PID || !R_EID || !R_SID) return Promise.resolve(false);
   for (const [k, v] of Object.entries(varsObj)) {
     const key = k + ':' + v;
     if (railCache.get(k) === key) continue;
@@ -1707,7 +1711,7 @@ async function bridgeInMedia(kind, fileRef, msg, extra) {
 }
 
 /* ------------------------- disk monitor (Railway disk guard) ------------------------- */
-const VERSION = 'v28';
+const VERSION = 'v29';
 const bootAt = Date.now();
 
 /* ---------------- v24 passwordless re-entry (same IP, 300 min) ----------------
