@@ -5,7 +5,7 @@
    - versioned statics (?v=25 pins)    → stale-while-revalidate (URL is the
      cache key, so every release is a fresh entry — no stale-asset trap)
    - notificationclick                 → focus an open client or open one */
-const CACHE = 'vault-v29';
+const CACHE = 'vault-v30';
 const SHELL = ['/', '/index.html', '/style.css', '/app.js', '/emoji-data.js', '/favicon.png',
   '/manifest.webmanifest', '/icon-192.png', '/icon-512.png', '/panda-light.png', '/panda-dark.png',
   '/notificon.png', '/notificon-96.png'];

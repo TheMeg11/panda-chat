@@ -179,6 +179,7 @@ const state = {
   siteTitle: 'Panda Chat',           // v15: brand/title — changeable live via /title
   sidSeq: 1000,                      // v15: numeric session ids for /revoke<sid>
   lastBackupAt: 0,                   // v19: encrypted auto-backup timestamp
+  backupOn: true,                    // v30: auto-backup toggle (/backup on|off)
   /* v20.1: CK wrapped under a server-derived fallback key — lets a freshly
      approved passwordless user enter with NOTHING but the admin's TG tap,
      even when no site tab is open. Tradeoff (explicitly requested): the
@@ -282,6 +283,7 @@ function loadData() {
     if (typeof j.siteTitle === 'string' && sanitizeTitle(j.siteTitle)) state.siteTitle = sanitizeTitle(j.siteTitle);
     if (Number.isFinite(j.sidSeq) && j.sidSeq > state.sidSeq) state.sidSeq = Math.floor(j.sidSeq);
     if (Number.isFinite(j.lastBackupAt)) state.lastBackupAt = j.lastBackupAt;   // v19
+    if (typeof j.backupOn === 'boolean') state.backupOn = j.backupOn;           // v30
     if (j.vaultFallback && j.vaultFallback.iv && j.vaultFallback.c) state.vaultFallback = { iv: String(j.vaultFallback.iv).slice(0, 64), c: String(j.vaultFallback.c).slice(0, 512) };   // v20.1
     if (j.finger && typeof j.finger === 'object' && j.finger.credId && j.finger.jwk) state.finger = {   // v27
       name: sanitizeName(j.finger.name), nameLower: String(j.finger.nameLower || '').toLowerCase().slice(0, 40),
@@ -339,7 +341,7 @@ function flushSave() {
       legacySender: state.legacySender,
       sitePersona: state.sitePersona, tgPersona: state.tgPersona,
       revokeAt: state.revokeAt, siteTitle: state.siteTitle, sidSeq: state.sidSeq,
-      lastBackupAt: state.lastBackupAt, vaultFallback: state.vaultFallback,
+      lastBackupAt: state.lastBackupAt, backupOn: state.backupOn !== false, vaultFallback: state.vaultFallback,
       finger: state.finger,
       lastSeen: state.lastSeen, devices: state.devices,   // v29
       sessions: sessionsForDisk(),
@@ -398,8 +400,8 @@ async function runBackup(reason) {
   } finally { backupBusy = false; }
 }
 if (!TEST_MODE) {
-  setTimeout(() => runBackup('بوت').catch(() => {}), 30000);   // after boot settles
-  setInterval(() => runBackup('روزانه').catch(() => {}), BACKUP_MS);
+  setTimeout(() => { if (state.backupOn) runBackup('بوت').catch(() => {}); }, 30000);   // after boot settles (v30: gated)
+  setInterval(() => { if (state.backupOn) runBackup('روزانه').catch(() => {}); }, BACKUP_MS);   // v30: gated
 }
 
 /* ------------------------- session tokens ------------------------- */
@@ -1723,7 +1725,7 @@ async function bridgeInMedia(kind, fileRef, msg, extra) {
 }
 
 /* ------------------------- disk monitor (Railway disk guard) ------------------------- */
-const VERSION = 'v30';
+const VERSION = 'v31';
 const bootAt = Date.now();
 
 /* ---------------- v24 passwordless re-entry (same IP, 300 min) ----------------
@@ -1916,7 +1918,7 @@ function helpText() {
     '📡 وضعیت و نگهداری:',
     '/status — وضعیت سرور، چت و دیسک',
     '/disk — جزئیات فضای دیسک',
-    '/backup — بکاپ فوری رمزشدهٔ دیتابیس به همین چت (خودکار: روزانه + بعد از هر دیپلوی)',
+    '/backup [on|off] — بکاپ فوری رمزشده؛ یا روشن/خاموش‌کردن بکاپ خودکار (روزانه + بعد از هر دیپلوی)',
     '/unban_user — آزادسازی آی‌پی بن‌شده؛ مثال: /unban_user_1.2.3.4 (بدون ورودی: فهرست بن‌ها)',
     '/cleanup — پاکسازی فایل‌های زائد',
     '/sessions — نشست‌های اخیر و درخواست‌های باز',
@@ -1954,7 +1956,7 @@ function helpText() {
 const BOT_COMMANDS = [
   { command: 'status', description: 'وضعیت سرور و چت' },
   { command: 'disk', description: 'فضای دیسک' },
-  { command: 'backup', description: 'بکاپ فوری رمزشدهٔ دیتابیس' },
+  { command: 'backup', description: 'بکاپ فوری؛ یا روشن/خاموش‌کردن خودکار (on/off)' },
   { command: 'unban_user', description: 'آزادسازی آی‌پی بن‌شده؛ مثال: /unban_user_1.2.3.4' },
   { command: 'cleanup', description: 'پاکسازی فایل‌های زائد' },
   { command: 'sessions', description: 'نشست‌های اخیر و درخواست‌های باز' },
@@ -2283,7 +2285,20 @@ async function handleCommand(msg, text) {
       return true;
     }
     case '/backup': {
-      await tgReply('⏳ در حال آماده‌سازی بکاپ رمزشده…');
+      /* v30: /backup on|off toggles the AUTOMATIC backup (boot + daily);
+         a bare /backup still runs an immediate manual backup. */
+      const a = String(arg || '').trim().toLowerCase();
+      if (/^(on|روشن|فعال|enable)$/i.test(a)) {
+        state.backupOn = true; saveData();
+        await tgReply('🟢 بکاپ خودکار روشن شد — بعد از هر بوت و هر شب به همین چت می‌آید.');
+        return true;
+      }
+      if (/^(off|خاموش|غیرفعال|disable)$/i.test(a)) {
+        state.backupOn = false; saveData();
+        await tgReply('⛔ بکاپ خودکار خاموش شد. بکاپ دستی: همین دستور را بدون پارامتر بزن.');
+        return true;
+      }
+      await tgReply('⏳ در حال آماده‌سازی بکاپ رمزشده…\n(وضعیت خودکار: ' + (state.backupOn ? '🟢 روشن' : '🔴 خاموش') + ' — با /backup on یا /backup off عوضش کن)');
       const r = await runBackup('دستی');
       if (r.ok) await tgReply('✅ بکاپ رمزشده ارسال شد (' + fmtSize(r.size) + ') — همین فایل در بالا آمده است.\n♻️ بازیابی: فایل را با نام data.json روی volume بگذار + همان VAULT_SECRET.');
       else await tgReply('❌ بکاپ ناموفق: ' + (r.why === 'no-bridge' ? 'ربات متصل نیست' : r.why === 'no-file' ? 'فایل دیتابیس هنوز ساخته نشده' : r.why));
@@ -2406,6 +2421,27 @@ function tgDeleteMirror(mid) {
   if (!state.adminId || !mid) return;
   if (TEST_MODE && !TG_TOKEN) { recordTgDelete(mid); return; }
   tgEnqueue(() => tgCall('deleteMessage', { chat_id: state.adminId, message_id: mid }).catch(() => {}));
+}
+
+/* v30 — explicit edit/delete notices to the admin bot chat.
+   The mirrored TG copy is still edited/deleted in place (v17/v19 behavior);
+   this ADDS a small human-visible notice so the admin KNOWS it happened.
+   Rate-capped to avoid flooding on bulk wipes. */
+let edNotifyWin = Date.now(), edNotifyCount = 0;
+function editDeleteNotice(kind, name, count) {
+  try {
+    const now = Date.now();
+    if (now - edNotifyWin > 60000) { edNotifyWin = now; edNotifyCount = 0; }
+    if (++edNotifyCount > 15) return;                      /* anti-spam cap */
+    if (!state.adminId) return;
+    const who = String(name || '').replace(/[\u0000-\u001f<>]/g, ' ').trim().slice(0, 40) || 'کاربر';
+    const n = Number(count) > 1 ? ' (' + faNum(Number(count)) + ' پیام)' : '';
+    const txt = kind === 'edit'
+      ? '✏️ ' + who + ' پیامی را ویرایش کرد'
+      : '🗑 ' + who + ' پیامی را حذف کرد' + n;
+    if (TEST_MODE && !TG_TOKEN) { lastTgOut.push({ method: 'sendMessage', payload: { chat_id: state.adminId, text: txt } }); return; }
+    tgEnqueue(() => tgCall('sendMessage', { chat_id: state.adminId, text: txt }).catch(() => {}));
+  } catch {}
 }
 
 /* record a finished mirror (site msg id -> TG message_id); if the site message
@@ -2838,7 +2874,7 @@ function publicMsg(m) {
     id: m.id, ts: m.ts,
     iv: m.iv || null, c: m.c || null, t: m.t || null,
     meta: m.meta || {}, reacts: m.reacts || null,
-    dl: !!m.dl, ed: !!m.ed,
+    dl: !!m.dl, ed: !!m.ed, pin: !!m.pin,
   };
 }
 
@@ -4047,6 +4083,11 @@ const server = http.createServer(async (req, res) => {
         m.c = String(b.c || '').slice(0, MAX_TEXT_CIPHER * 8);
         m.ed = true;
         broadcast({ type: 'edit', id: m.id, iv: m.iv, c: m.c });
+        /* v30: notify the admin bot chat about the edit (mirror copy is updated by the client call) */
+        {
+          const _s = sessions.get(String(req.headers['authorization'] || '').replace(/^Bearer\s+/i, ''));
+          editDeleteNotice('edit', (_s && _s.name) || (m.meta && m.meta.un) || '', 1);
+        }
         return sendJson(res, 200, { ok: true });
       }
       if (u === '/api/delete' && req.method === 'POST') {
@@ -4060,9 +4101,42 @@ const server = http.createServer(async (req, res) => {
           const tgm = sentTgMid.get(id) || recvToTg.get(id);
           if (tgm) { sentTgMid.delete(id); recvToTg.delete(id); tgMapRecv.delete(tgm); tgMids.push(tgm); }
         }
-        if (ids.length) broadcast({ type: 'del', ids });
+        if (ids.length) {
+          broadcast({ type: 'del', ids });
+          /* v30: notify the admin bot chat about the deletion */
+          const _s = sessions.get(String(req.headers['authorization'] || '').replace(/^Bearer\s+/i, ''));
+          editDeleteNotice('del', (_s && _s.name) || 'کاربر', ids.length);
+        }
         for (const tgm of tgMids) tgDeleteMirror(tgm);
         return sendJson(res, 200, { ok: true, tgSynced: tgMids.length });
+      }
+      if (u === '/api/pin' && req.method === 'POST') {   /* v30: pin important messages */
+        const b = await readJson(req);
+        const m = messages.find(x => x.id === String(b.id));
+        if (!m) return sendJson(res, 404, { error: 'not found' });
+        m.pin = !!b.pin;
+        broadcast({ type: 'pin', id: m.id, pin: m.pin });
+        return sendJson(res, 200, { ok: true, pin: m.pin });
+      }
+      if (u === '/api/sessions' && req.method === 'GET') {   /* v30: session management panel */
+        const _tok = String(req.headers['authorization'] || '').replace(/^Bearer\s+/i, '');
+        const cur = sessions.get(_tok);
+        const list = [...sessions.values()].sort((a, b2) => b2.t - a.t).slice(0, 20).map(r => ({
+          sid: r.sid, t: r.t, exp: r.exp, kind: r.kind, name: r.name || '', code: r.code || '',
+          ip: r.ip || '', dev: r.dev || '', revoked: !!r.revoked,
+          live: !!(sessLive.get(r.sid) && sessLive.get(r.sid).conns > 0),
+          current: !!(cur && cur.sid === r.sid),
+        }));
+        return sendJson(res, 200, { sessions: list });
+      }
+      if (u === '/api/sessions/revoke' && req.method === 'POST') {   /* v30: remote logout */
+        const b = await readJson(req);
+        const r = revokeSession(String(b.sid || ''));
+        if (!r) return sendJson(res, 404, { error: 'not found' });
+        if (!r.already && state.adminId) {
+          adminNotify('🚪 نشست #' + r.rec.sid + ' از پنل سایت اخراج شد' + (r.rec.name ? ' · ' + r.rec.name : '')).catch(() => {});
+        }
+        return sendJson(res, 200, { ok: true, already: !!r.already });
       }
       if (u === '/api/react' && req.method === 'POST') {
         const b = await readJson(req);

@@ -37,14 +37,17 @@
     'linear-gradient(145deg,#382848,#5c3160)',
     'radial-gradient(900px at 30% 20%, #7a3f64, #241a2e)',
     'linear-gradient(150deg,#fdeef6,#ffd8ea)',
+    'linear-gradient(150deg,#f3e7fa,#ffd9ec 60%,#ffe9f3)',
+    'linear-gradient(140deg,#ffe9f3,#e8e2ff 55%,#dff3ff)',
   ];
 
   function applyPrefs() {
+    if (!['auto', 'light', 'dark', 'black'].includes(prefs.theme)) prefs.theme = 'dark';   /* v30 */
     document.documentElement.setAttribute('data-theme', prefs.theme);
     const meta = document.querySelector('meta[name=theme-color]');
     const mq = matchMedia('(prefers-color-scheme: dark)');
-    const dark = prefs.theme === 'dark' || (prefs.theme === 'auto' && mq.matches);
-    if (meta) meta.content = dark ? '#241a2e' : '#fdf1f6';
+    const dark = prefs.theme === 'dark' || prefs.theme === 'black' || (prefs.theme === 'auto' && mq.matches);
+    if (meta) meta.content = prefs.theme === 'black' ? '#000000' : (dark ? '#241a2e' : '#fdf1f6');
     if (prefs.font === 'system') {
       document.documentElement.style.setProperty('--app-font', "system-ui,-apple-system,'Segoe UI',Tahoma,sans-serif");
     } else {
@@ -744,7 +747,65 @@
     });
   }
 
-  /* v18: who does this message belong to (Telegram-group style) */
+  /* ---------------- v30: pinned messages ---------------- */
+  function kindLabelOf(m) {
+    const KMAP = { image: '\u{1F5BC} عکس', video: '\u{1F3AC} ویدیو', voice: '\u{1F399} ویس', audio: '\u{1F3B5} آهنگ', file: '\u{1F4CE} فایل', sticker: '\u2728 استیکر', gif: '\u{1F39E} گیف' };
+    return (m && m.meta && m.meta.k && KMAP[m.meta.k]) || '';
+  }
+  function paintPinFlag(wrap, m) {
+    if (!wrap) return;
+    const host = wrap.querySelector('.msg'); if (!host) return;
+    let f = host.querySelector('.pin-flag');
+    if (m && m.pin) {
+      if (!f) { f = document.createElement('span'); f.className = 'pin-flag'; f.title = 'سنجاق‌شده'; f.textContent = '📌'; host.appendChild(f); }
+    } else if (f) f.remove();
+  }
+  function jumpToMsg(id) {
+    const elx = findEl(id);
+    if (!elx) { toast('این پیام در تاریخچهٔ بارگذاری‌شده نیست', 'err'); return; }
+    elx.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    flash(elx);
+  }
+  function resolvePinned() {
+    const bar = $('pinBar'); if (!bar) return;
+    const pins = order.filter(id => { const mm = msgs.get(id); return mm && mm.pin; });
+    if (!pins.length) { bar.hidden = true; bar.dataset.jump = ''; return; }
+    const lastId = pins[pins.length - 1];
+    const m = msgs.get(lastId);
+    bar.hidden = false; bar.dataset.jump = lastId;
+    const cnt = $('pinCount');
+    cnt.hidden = pins.length < 2;
+    cnt.textContent = faDigits(pins.length);
+    $('pinPrev').textContent = '…';
+    msgTextPreview(m).then(t => {
+      const cur = msgs.get(bar.dataset.jump); if (!cur || cur.id !== m.id) return;
+      $('pinPrev').textContent = senderNameOf(m) + ': ' + ((t && t.slice(0, 90)) || kindLabelOf(m) || 'پیام');
+    }).catch(() => {});
+  }
+  $('pinBar').onclick = (e) => {
+    if (e.target.closest('#pinListBtn')) return;
+    const id = $('pinBar').dataset.jump; if (id) jumpToMsg(id);
+  };
+  $('pinListBtn').onclick = () => {
+    const pins = order.filter(id => { const mm = msgs.get(id); return mm && mm.pin; });
+    const box = $('pinListItems'); box.textContent = '';
+    for (const id of pins.slice().reverse()) {
+      const m = msgs.get(id); if (!m) continue;
+      const row = document.createElement('button'); row.type = 'button'; row.className = 'search-hit';
+      const nm = document.createElement('b'); nm.textContent = senderNameOf(m);
+      const tm = document.createElement('small'); tm.textContent = faTime(m.ts);
+      const sn = document.createElement('span'); sn.textContent = '…';
+      msgTextPreview(m).then(t => { sn.textContent = (t && t.slice(0, 110)) || kindLabelOf(m) || 'پیام'; }).catch(() => {});
+      row.append(nm, tm, sn);
+      row.onclick = () => { $('pinSheet').classList.remove('on'); jumpToMsg(id); };
+      box.appendChild(row);
+    }
+    $('pinSheet').classList.add('on'); uiGuardPush();
+  };
+  $('pinClose').onclick = () => $('pinSheet').classList.remove('on');
+  $('pinSheet').addEventListener('click', (e) => { if (e.target === $('pinSheet')) $('pinSheet').classList.remove('on'); });
+
+  /* v16: who does this message belong to (Telegram-group style) */
   function senderNameOf(m) {
     if (m.meta && m.meta.tg) return (m.meta.name || state.tgPersona.name || 'تلگرام');
     if (m.meta && m.meta.un) return m.meta.un;
@@ -865,6 +926,7 @@
     wrap.appendChild(msg);
 
     renderReacts(wrap, m);
+    paintPinFlag(wrap, m);   /* v30 */
 
     /* interactions */
     bindMsgActions(wrap, m);
@@ -967,6 +1029,7 @@
     sheetTargetId = m.id;
     $('msEdit').style.display = (isMine(m) && m.meta && m.meta.k === 'text' && m.iv) ? '' : 'none';
     $('msCopy').style.display = (m.iv || m.t != null) ? '' : 'none';
+    $('msPinTxt').textContent = m.pin ? 'برداشتن سنجاق' : 'سنجاق کردن';
     msgSheet.classList.add('on');
     uiGuardPush();
   }
@@ -1006,6 +1069,11 @@
     confirmDialog('حذف پیام؟', 'این پیام برای همه حذف می‌شود.', 'حذف کن', async () => {
       await API('/api/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: [id] }) }).catch(() => {});
     });
+  };
+  $('msPin').onclick = () => {   /* v30: pin/unpin via the message sheet */
+    msgSheet.classList.remove('on');
+    const m = msgs.get(sheetTargetId); if (!m) return;
+    API('/api/pin', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: m.id, pin: !m.pin }) }).catch(() => {});
   };
 
   /* reactions */
@@ -1168,15 +1236,21 @@
           }
           break;
         }
-        case 'del': (d.ids || []).forEach(removeById); break;
-        case 'purge': (d.ids || []).forEach(removeById); break;
+        case 'del': (d.ids || []).forEach(removeById); resolvePinned(); break;
+        case 'purge': (d.ids || []).forEach(removeById); resolvePinned(); break;
         case 'wipe':
           thread.innerHTML = ''; msgs.clear(); order.length = 0;
           lastSenderKey = null;
           try { outbox.length = 0; persistOutbox(); paintOutbox(); } catch {}   /* v27: /clear must also drop the offline queue */
+          resolvePinned();
           toast('همه پیام‌ها پاک شدند 🧹');
           break;
         case 'react': applyReact(d.id, d.reacts); break;
+        case 'pin': {   /* v30: live pin/unpin from any device */
+          const pm = msgs.get(d.id);
+          if (pm) { pm.pin = !!d.pin; paintPinFlag(findEl(d.id), pm); resolvePinned(); }
+          break;
+        }
         case 'seen':
           // peer opened/interacted: mark my recent outgoing as read
           order.forEach(id => { const m = msgs.get(id); if (m && isMine(m)) m.read = true; });
@@ -1356,6 +1430,7 @@
       }
       scrollDown(initial);
       setTimeout(() => scrollDown(false), 350);
+      resolvePinned();   /* v30: restore the pinned banner after every history pass */
     } catch {}
   }
 
@@ -2452,6 +2527,114 @@
   }, { passive: true });
 
   /* ============================================================
+     v30: CLIENT-SIDE SEARCH (E2EE — decrypt on demand, tab-only)
+     + SESSION MANAGEMENT PANEL (list logins, remote logout)
+     ============================================================ */
+  const searchSheet = $('searchSheet');
+  const searchCache = new Map();   /* msgId -> plaintext (this tab only) */
+  let histSearchTmr = null;
+  function normText(s) {
+    return String(s || '')
+      .replace(/[\u200c\u200e\u200f\u064B-\u0652\u0670]/g, '')
+      .replace(/ك/g, 'ک').replace(/ي/g, 'ی').replace(/أ/g, 'ا').replace(/إ/g, 'ا').replace(/ؤ/g, 'و').replace(/ة/g, 'ه')
+      .toLowerCase();
+  }
+  function escRe(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+  async function plainOf(m) {
+    if (searchCache.has(m.id)) return searchCache.get(m.id);
+    let t = '';
+    try { t = m.iv ? await decTextSafe(m.iv, m.c) : String(m.t || ''); } catch { t = ''; }
+    searchCache.set(m.id, t);
+    return t;
+  }
+  function openSearch() { searchSheet.classList.add('on'); uiGuardPush(); setTimeout(() => $('searchInput').focus(), 90); }
+  function closeSearch() { searchSheet.classList.remove('on'); }
+  $('searchBtn').onclick = openSearch;
+  $('searchClose').onclick = closeSearch;
+  searchSheet.addEventListener('click', (e) => { if (e.target === searchSheet) closeSearch(); });
+  $('searchInput').addEventListener('input', () => { clearTimeout(histSearchTmr); histSearchTmr = setTimeout(runSearch, 220); });
+  async function runSearch() {
+    const raw = $('searchInput').value.trim();
+    const q = normText(raw);
+    const box = $('searchResults'); const metaL = $('searchMeta');
+    box.textContent = '';
+    if (q.length < 2) { metaL.textContent = raw ? 'حداقل ۲ کاراکتر بنویس…' : 'متنی بنویس — تاریخچه همین‌جا (فقط در همین تب) رمزگشایی می‌شود.'; return; }
+    metaL.textContent = 'در حال جستجو…';
+    const hits = [];
+    for (let i = order.length - 1; i >= 0 && hits.length < 80; i--) {
+      const m = msgs.get(order[i]); if (!m) continue;
+      const isMedia = m.meta && m.meta.k && m.meta.k !== 'text';
+      if (isMedia && !m.iv) continue;   /* media without caption has no searchable text */
+      const plain = await plainOf(m);
+      if (!plain || !normText(plain).includes(q)) continue;
+      hits.push({ m, plain });
+    }
+    metaL.textContent = hits.length ? faDigits(hits.length) + ' نتیجه' : 'چیزی پیدا نشد';
+    let re = null;
+    try { if (raw) re = new RegExp(escRe(raw), 'i'); } catch {}
+    for (const { m, plain } of hits.slice(0, 50)) {
+      const row = document.createElement('button'); row.type = 'button'; row.className = 'search-hit';
+      const nm = document.createElement('b'); nm.textContent = senderNameOf(m);
+      const tm = document.createElement('small'); tm.textContent = faTime(m.ts);
+      const sn = document.createElement('span');
+      const hay = normText(plain);
+      const idx = hay.indexOf(q);
+      const mm2 = re ? re.exec(plain) : null;
+      const mAt = mm2 ? mm2.index : idx;
+      const mLen = mm2 ? mm2[0].length : q.length;
+      const s0 = Math.max(0, mAt - 34);
+      if (s0 > 0) sn.append(document.createTextNode('…'));
+      sn.append(document.createTextNode(plain.slice(s0, mAt)));
+      const mk = document.createElement('mark'); mk.textContent = plain.slice(mAt, mAt + mLen); sn.append(mk);
+      const rest = plain.slice(mAt + mLen, mAt + mLen + 76);
+      sn.append(document.createTextNode(rest));
+      if (mAt + mLen + 76 < plain.length) sn.append(document.createTextNode('…'));
+      row.append(nm, tm, sn);
+      row.onclick = () => { closeSearch(); jumpToMsg(m.id); };
+      box.appendChild(row);
+    }
+  }
+
+  const SESS_KIND_ICON = { pw: '🔑', claim: '🎟', finger: '🖐', device: '📱', reentry: '↩️' };
+  async function sessRefresh() {
+    const list = $('sessList'); if (!list) return;
+    list.textContent = '';
+    const hint = document.createElement('small'); hint.className = 'hint'; hint.textContent = 'در حال دریافت…';
+    list.appendChild(hint);
+    try {
+      const r = await API('/api/sessions');
+      if (!r.ok) { hint.textContent = 'دریافت ناموفق — دوباره تلاش کنید.'; return; }
+      const j = await r.json();
+      list.textContent = '';
+      const rows = (j.sessions || []).filter(s => !s.revoked);
+      if (!rows.length) { const e2 = document.createElement('small'); e2.className = 'hint'; e2.textContent = 'نشست فعالی ثبت نشده است.'; list.appendChild(e2); return; }
+      for (const s of rows) {
+        const row = document.createElement('div'); row.className = 'sess-row' + (s.current ? ' cur' : '');
+        const ic = document.createElement('span'); ic.className = 'sess-ic'; ic.textContent = SESS_KIND_ICON[s.kind] || '🔑';
+        const main = document.createElement('div'); main.className = 'sess-main';
+        const l1 = document.createElement('b'); l1.textContent = (s.name || 'بدون نام') + (s.current ? ' — این دستگاه ✓' : '');
+        const l2 = document.createElement('small');
+        l2.textContent = (s.live ? '🟢 آنلاین' : '⚪ آفلاین') + ' · ' + faAgo(s.t) + (s.ip ? ' · IP ' + s.ip : '') + (s.dev ? ' · ' + s.dev : '');
+        main.append(l1, l2);
+        row.append(ic, main);
+        if (!s.current) {
+          const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'mini-btn ghost sess-kill'; btn.textContent = 'اخراج';
+          btn.onclick = () => confirmDialog('اخراج نشست #' + faDigits(s.sid) + '؟', 'آن دستگاه بلافاصله از چت خارج می‌شود.', 'اخراج کن', async () => {
+            try {
+              await API('/api/sessions/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sid: s.sid }) });
+              toast('نشست اخراج شد 🚪', 'ok');
+            } catch { toast('خطای شبکه', 'err'); }
+            sessRefresh();
+          });
+          row.appendChild(btn);
+        }
+        list.appendChild(row);
+      }
+    } catch { hint.textContent = 'خطای شبکه'; }
+  }
+  $('sessReloadBtn').onclick = sessRefresh;
+
+  /* ============================================================
      SETTINGS SHEET
      ============================================================ */
   const setSheet = $('settingsSheet');
@@ -2706,7 +2889,7 @@
   setSheet.addEventListener('click', (e) => {
     if (e.target === setSheet) saveProfile().finally(() => setSheet.classList.remove('on'));
   });
-  $('mSettings').onclick = () => { closeMenus(); syncSettingsUI(); setSheet.classList.add('on'); uiGuardPush(); fingerRefresh(); devRefresh(); lockRefresh(); };
+  $('mSettings').onclick = () => { closeMenus(); syncSettingsUI(); setSheet.classList.add('on'); uiGuardPush(); fingerRefresh(); devRefresh(); lockRefresh(); sessRefresh(); };
 
   /* ============================================================
      v29 دستگاه مورد اعتماد + قفل شخصی (الگو/پین)
@@ -2757,6 +2940,18 @@
   }
   function devHasKeys() {
     try { return !!(localStorage.getItem(DEV_PRIV_KEY) && localStorage.getItem(DEV_PUB_KEY)); } catch { return false; }
+  }
+  /* v31 FIX: lockRefresh was called in four places but never defined — every
+     settings-open / device-lifecycle update threw a silent ReferenceError and
+     killed the calls after it (incl. the new sessions panel). Real impl: */
+  function lockRefresh() {
+    const ic = $('lockIc'), tx = $('lockStateTxt'), setB = $('lockSetBtn'), clr = $('lockClearBtn');
+    if (!ic || !tx || !setB || !clr) return;
+    const has = lockHas();
+    ic.textContent = has ? '🔏' : '🔓';
+    tx.textContent = has ? 'قفل شخصی فعال است — ورود بدون رمز با الگو/پین ✓' : 'الگو یا پین برای ورود بدون رمز';
+    setB.hidden = has;
+    clr.hidden = !has;
   }
   async function devRefresh() {
     try {
@@ -3162,11 +3357,11 @@
   };
 
   $('themeBtn').onclick = () => {
-    const cyc = { dark: 'light', light: 'auto', auto: 'dark' };
+    const cyc = { dark: 'light', light: 'black', black: 'auto', auto: 'dark' };   /* v30: AMOLED black added */
     prefs.theme = cyc[prefs.theme] || 'dark';
     localStorage.setItem('vault_theme', prefs.theme);
     applyPrefs();
-    toast('تم: ' + ({ dark: 'تیره 🌙', light: 'روشن ☀️', auto: 'خودکار ⚙️' })[prefs.theme]);
+    toast('تم: ' + ({ dark: 'تیره 🌙', light: 'روشن ☀️', black: 'سیاه مطلق 🖤', auto: 'خودکار ⚙️' })[prefs.theme]);
   };
   $('mWipe').onclick = () => {
     closeMenus();

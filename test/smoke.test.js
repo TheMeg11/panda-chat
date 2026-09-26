@@ -62,6 +62,7 @@ before(async () => {
       PASSWORD: PW,
       VAULT_SECRET: 'smoke-test-vault-secret',
       VAULT_TEST_MODE: '1',
+      TELEGRAM_ADMIN_ID: '555000111',   /* v30: notices/backup need an admin target */
       RAILWAY_VOLUME_MOUNT_PATH: dataDir,
     }),
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -299,4 +300,115 @@ test('test-mode hooks are reachable only in TEST_MODE', async () => {
     body: '{}',
   });
   assert.strictEqual(r.status, 200);
+});
+
+/* ================= v30 feature tests ================= */
+
+test('v30: pin / unpin a message via /api/pin', async () => {
+  const tok = globalThis.__smokeTok;
+  assert.ok(tok, 'migration test must run first');
+  const send = await request('POST', '/api/send', {
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + tok },
+    body: JSON.stringify({ iv: 'AAAAAAAAAAAAAAAAAAAAAA==', c: 'AAAAAAAAAAAAAAAAAAAAAA==', meta: { k: 'text', from: 'smoketag1234567890', un: 'smoke' } }),
+  });
+  assert.strictEqual(send.status, 200, 'send: ' + send.body);
+  const mid = JSON.parse(send.body).id;
+  assert.ok(mid);
+
+  const pin = await request('POST', '/api/pin', {
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + tok },
+    body: JSON.stringify({ id: mid, pin: true }),
+  });
+  assert.strictEqual(pin.status, 200, 'pin: ' + pin.body);
+  assert.strictEqual(JSON.parse(pin.body).pin, true);
+
+  const h = await request('GET', '/api/history', { headers: { Authorization: 'Bearer ' + tok } });
+  const hj = JSON.parse(h.body);
+  const m = hj.messages.find(x => x.id === mid);
+  assert.ok(m, 'message in history');
+  assert.strictEqual(m.pin, true, 'pin persisted in history');
+
+  const un = await request('POST', '/api/pin', {
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + tok },
+    body: JSON.stringify({ id: mid, pin: false }),
+  });
+  assert.strictEqual(JSON.parse(un.body).pin, false);
+  const pin404 = await request('POST', '/api/pin', {
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + tok },
+    body: JSON.stringify({ id: 'nope', pin: true }),
+  });
+  assert.strictEqual(pin404.status, 404);
+});
+
+test('v30: edit and delete notify the admin bot chat', async () => {
+  const tok = globalThis.__smokeTok;
+  const send = await request('POST', '/api/send', {
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + tok },
+    body: JSON.stringify({ iv: 'BBBBBBBBBBBBBBBBBBBBAA==', c: 'BBBBBBBBBBBBBBBBBBBBAA==', meta: { k: 'text', from: 'smoketag1234567890', un: 'smoke' } }),
+  });
+  const mid = JSON.parse(send.body).id;
+  const ed = await request('POST', '/api/edit', {
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + tok },
+    body: JSON.stringify({ id: mid, iv: 'CCCCCCCCCCCCCCCCCCCCAA==', c: 'CCCCCCCCCCCCCCCCCCCCAA==' }),
+  });
+  assert.strictEqual(ed.status, 200);
+  const del = await request('POST', '/api/delete', {
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + tok },
+    body: JSON.stringify({ ids: [mid] }),
+  });
+  assert.strictEqual(del.status, 200);
+  /* notices are captured as outgoing TG sendMessage calls in TEST_MODE */
+  const out = await request('POST', '/__test/tgout', {
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ method: 'sendMessage' }),
+  });
+  const texts = JSON.parse(out.body).out.map(x => (x.payload && x.payload.text) || '').join('\n');
+  assert.ok(texts.includes('ویرایش کرد'), 'edit notice sent: ' + texts.slice(-200));
+  assert.ok(texts.includes('حذف کرد'), 'delete notice sent: ' + texts.slice(-200));
+});
+
+test('v30: /backup on|off toggles the auto-backup flag', async () => {
+  const cmd = async (text) => {
+    const r = await request('POST', '/__test/cmd', {
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    assert.strictEqual(r.status, 200);
+    return (JSON.parse(r.body).replies || []).join('\n');
+  };
+  const off = await cmd('/backup off');
+  assert.ok(off.includes('خاموش'), 'off reply: ' + off.slice(0, 140));
+  const on = await cmd('/backup on');
+  assert.ok(on.includes('روشن'), 'on reply: ' + on.slice(0, 140));
+  /* the debounced save (400ms) must land on disk before a manual backup can read data.json */
+  await new Promise(r => setTimeout(r, 700));
+  const manual = await cmd('/backup');
+  assert.ok(manual.includes('وضعیت خودکار'), 'manual run shows toggle state: ' + manual.slice(0, 160));
+  assert.ok(manual.includes('بکاپ رمزشده ارسال شد'), 'manual backup ran: ' + manual.slice(0, 200));
+});
+
+test('v30: sessions panel lists + revokes remotely', async () => {
+  const tok = globalThis.__smokeTok;
+  const list = await request('GET', '/api/sessions', { headers: { Authorization: 'Bearer ' + tok } });
+  assert.strictEqual(list.status, 200, 'sessions list: ' + list.body);
+  const j = JSON.parse(list.body);
+  assert.ok(Array.isArray(j.sessions), 'sessions array');
+  const cur = j.sessions.find(s => s.current);
+  assert.ok(cur, 'current session marked');
+  assert.strictEqual(cur.revoked, false);
+  assert.ok(!cur.tok && !JSON.stringify(j).includes(tok.slice(0, 20)), 'no token material leaked');
+
+  const rev = await request('POST', '/api/sessions/revoke', {
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + tok },
+    body: JSON.stringify({ sid: cur.sid }),
+  });
+  assert.strictEqual(rev.status, 200, 'revoke: ' + rev.body);
+  /* the revoked token must be dead right away */
+  const h = await request('GET', '/api/history', { headers: { Authorization: 'Bearer ' + tok } });
+  assert.strictEqual(h.status, 401, 'revoked session is unauthorized');
+  const rev404 = await request('POST', '/api/sessions/revoke', {
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + tok },
+    body: JSON.stringify({ sid: '999999' }),
+  });
+  assert.strictEqual(rev404.status, 401, 'revoked token cannot call the API at all');
 });

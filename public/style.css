@@ -33,27 +33,27 @@
   --app-font:'Vazirmatn',system-ui,-apple-system,'Segoe UI',Tahoma,sans-serif;
   --fs:calc(16px * var(--z));
 
-  /* dark (default) — soft plum night, easy on the eyes */
-  --bg:#241a2e;
-  --bg-soft:#2b1f36;
-  --panel:#302340;
-  --panel-2:#3c2a4c;
-  --compose:#382848;
-  --bubble-in:#3a2a49;
-  --bubble-in-2:#453354;
-  --bubble-out:#8a4a72;
-  --bubble-out-2:#7a3f64;
-  --bubble-out-tx:#fbe7f1;
-  --accent:#f2a0cd;
-  --accent-deep:#cf4f95;
+  /* dark (default) — pastel plum-lavender night, girly and soft (v30) */
+  --bg:#2a1e38;
+  --bg-soft:#332547;
+  --panel:#362a4d;
+  --panel-2:#42355c;
+  --compose:#3f3158;
+  --bubble-in:#41305a;
+  --bubble-in-2:#4c3a66;
+  --bubble-out:#b0699f;
+  --bubble-out-2:#9c5a8e;
+  --bubble-out-tx:#fff0f8;
+  --accent:#f8b3d9;
+  --accent-deep:#e37fb4;
   --ok:#6bc98f;
   --danger:#f4879b;
   --warn:#ffc98a;
-  --text:#f6ecf3;
-  --muted:#c39fc7;
-  --muted-2:#a67fad;
-  --line:rgba(255,255,255,.065);
-  --line-strong:rgba(255,255,255,.12);
+  --text:#f8eff6;
+  --muted:#cdaad2;
+  --muted-2:#b291b9;
+  --line:rgba(255,255,255,.07);
+  --line-strong:rgba(255,255,255,.13);
   /* liquid-glass tokens (dark) */
   --glass-hi:rgba(255,255,255,.17);
   --glass-edge:rgba(255,255,255,.14);
@@ -65,11 +65,11 @@
   --overlay-bg:rgba(20,10,22,.62);
   --shadow:0 10px 34px rgba(0,0,0,.38);
   --shadow-sm:0 3px 14px rgba(0,0,0,.22);
-  --tick:#f3b8da;
+  --tick:#f9c6e2;
   --wall-dim:.36;
 }
 html[data-theme="light"]{
-  /* light — blush pastel background, soft and girly */
+  /* light — blush pastel + soft lilac, extra girly (v30) */
   --bg:#fdf1f6;
   --bg-soft:#fbe4ef;
   --panel:#ffffff;
@@ -77,17 +77,17 @@ html[data-theme="light"]{
   --compose:#fdf3f8;
   --bubble-in:#ffffff;
   --bubble-in-2:#fdf1f7;
-  --bubble-out:#ffd3e6;                    /* soft candy pink */
-  --bubble-out-2:#ffc0da;
-  --bubble-out-tx:#5c1f3c;
-  --accent:#c73a80;
-  --accent-deep:#ad2f6f;
-  --ok:#2f9760;
-  --danger:#d83f66;
-  --warn:#c76d2e;
-  --text:#3d2436;
-  --muted:#8f647c;
-  --muted-2:#b98aa0;
+  --bubble-out:#ffd9ec;
+  --bubble-out-2:#ffd0e6;
+  --bubble-out-tx:#5c2140;
+  --accent:#d865a8;
+  --accent-deep:#c2508f;
+  --ok:#3aa877;
+  --danger:#e05c82;
+  --warn:#d78a4a;
+  --text:#47304a;
+  --muted:#96687f;
+  --muted-2:#bb8fa6;
   --line:#f6dce8;
   --line-strong:#f0c9dc;
   /* liquid-glass tokens (light) */
@@ -98,23 +98,57 @@ html[data-theme="light"]{
   --overlay-bg:rgba(90,40,65,.40);
   --shadow:0 10px 30px rgba(210,90,150,.16);
   --shadow-sm:0 2px 10px rgba(210,90,150,.10);
-  --tick:#ad2f6f;
+  --tick:#c2508f;
 }
 @media (prefers-color-scheme: light){
   html[data-theme="auto"]{
     --bg:#fdf1f6;--bg-soft:#fbe4ef;--panel:#ffffff;--panel-2:#fdeef6;--compose:#fdf3f8;
     --bubble-in:#ffffff;--bubble-in-2:#fdf1f7;
-    --bubble-out:#ffd3e6;--bubble-out-2:#ffc0da;--bubble-out-tx:#5c1f3c;
-    --accent:#c73a80;--accent-deep:#ad2f6f;--ok:#2f9760;--danger:#d83f66;--warn:#c76d2e;
-    --text:#3d2436;--muted:#8f647c;--muted-2:#b98aa0;
+    --bubble-out:#ffd9ec;--bubble-out-2:#ffd0e6;--bubble-out-tx:#5c2140;
+    --accent:#d865a8;--accent-deep:#c2508f;--ok:#3aa877;--danger:#e05c82;--warn:#d78a4a;
+    --text:#47304a;--muted:#96687f;--muted-2:#bb8fa6;
     --line:#f6dce8;--line-strong:#f0c9dc;
     --glass-hi:rgba(255,255,255,.70);--glass-edge:rgba(255,255,255,.78);
     --dock-blur:26px;--dock-shadow:0 12px 30px rgba(210,90,150,.18);
     --overlay-bg:rgba(90,40,65,.40);
     --shadow:0 10px 30px rgba(210,90,150,.16);
     --shadow-sm:0 2px 10px rgba(210,90,150,.10);
-    --tick:#ad2f6f;
+    --tick:#c2508f;
   }
+}
+
+/* v30: AMOLED pitch black — for the night with the screen dimmed way down.
+   True #000 background, panels nearly invisible, pastel-rose accents. */
+html[data-theme="black"]{
+  --bg:#000000;
+  --bg-soft:#060608;
+  --panel:#0b0b0e;
+  --panel-2:#121216;
+  --compose:#0f0f13;
+  --bubble-in:#131317;
+  --bubble-in-2:#1a1a20;
+  --bubble-out:#33132a;
+  --bubble-out-2:#2a0f22;
+  --bubble-out-tx:#ffdff0;
+  --accent:#ff9ed2;
+  --accent-deep:#e06aa8;
+  --ok:#7cd9a2;
+  --danger:#ff8fa8;
+  --warn:#ffd0a3;
+  --text:#f2e6ee;
+  --muted:#9a8aa0;
+  --muted-2:#6d5f74;
+  --line:rgba(255,255,255,.07);
+  --line-strong:rgba(255,255,255,.14);
+  --glass-hi:rgba(255,255,255,.05);
+  --glass-edge:rgba(255,255,255,.09);
+  --dock-blur:26px;
+  --dock-shadow:0 14px 38px rgba(0,0,0,.65);
+  --overlay-bg:rgba(0,0,0,.74);
+  --shadow:0 10px 34px rgba(0,0,0,.65);
+  --shadow-sm:0 3px 14px rgba(0,0,0,.55);
+  --tick:#ffb3d9;
+  --wall-dim:.30;
 }
 
 /* ---------- base ---------- */
@@ -1534,3 +1568,64 @@ html[data-theme="light"] .claim-row input,html[data-theme="auto"] .claim-row inp
 .pop-seen{display:block;margin-top:4px;font-size:11.5px;color:var(--muted);line-height:1.7}
 .dev-btn{border-color:color-mix(in srgb,var(--ok) 45%,transparent);color:var(--ok);background:color-mix(in srgb,var(--ok) 9%,transparent)}
 .dev-btn:hover{background:color-mix(in srgb,var(--ok) 16%,transparent)}
+
+/* ================= v30: pinned banner / search / sessions ================= */
+.pin-bar{
+  display:flex;align-items:center;gap:9px;
+  padding:7px 12px;
+  background:color-mix(in srgb,var(--panel) 82%,transparent);
+  backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+  border-bottom:1px solid var(--line);
+  cursor:pointer;z-index:11;
+  animation:pinIn .28s ease;
+}
+@keyframes pinIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+.pin-bar .pin-ic{font-size:15px;flex:none}
+.pin-bar .pin-body{flex:1;min-width:0;line-height:1.45}
+.pin-bar .pin-body b{display:block;font-size:11.5px;color:var(--accent-deep)}
+.pin-bar .pin-body small{display:block;font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pin-bar .pin-count{
+  flex:none;min-width:20px;height:20px;padding:0 6px;border-radius:999px;
+  background:var(--accent);color:#fff;font-size:11px;font-weight:800;
+  display:grid;place-items:center;
+}
+.pin-bar .icon-btn.small{width:28px;height:28px;flex:none}
+.pin-flag{
+  position:absolute;top:-7px;inset-inline-end:10px;
+  font-size:12px;line-height:1;pointer-events:none;
+  filter:drop-shadow(0 1px 2px rgba(0,0,0,.25));
+}
+.search-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}
+.search-head h3{font-size:16px;font-weight:800}
+.search-row{margin-bottom:8px}
+.search-row input{
+  width:100%;padding:11px 14px;border-radius:14px;border:1px solid var(--line-strong);
+  background:var(--panel-2);color:var(--text);font:inherit;font-size:14px;outline:none;
+}
+.search-row input:focus{border-color:var(--accent)}
+.search-results{display:flex;flex-direction:column;gap:6px;overflow-y:auto;max-height:min(52vh,430px);padding:2px;margin-top:8px}
+.search-hit{
+  display:grid;grid-template-columns:auto auto 1fr;align-items:baseline;gap:8px;
+  width:100%;text-align:start;padding:10px 12px;border-radius:13px;
+  border:1px solid var(--line);background:var(--panel-2);color:var(--text);
+  font:inherit;cursor:pointer;transition:background .15s,border-color .15s;
+}
+.search-hit:hover{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--panel-2))}
+.search-hit b{font-size:12.5px;color:var(--accent-deep);white-space:nowrap}
+.search-hit small{font-size:10.5px;color:var(--muted);white-space:nowrap}
+.search-hit span{
+  grid-column:1 / -1;font-size:12.5px;color:var(--text);line-height:1.7;
+  word-break:break-word;display:block;
+}
+.search-hit mark{background:color-mix(in srgb,var(--accent) 32%,transparent);color:var(--text);border-radius:4px;padding:0 2px}
+.sess-list{display:flex;flex-direction:column;gap:7px;margin-top:10px}
+.sess-row{
+  display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:13px;
+  border:1px solid var(--line);background:var(--panel-2);
+}
+.sess-row.cur{border-color:color-mix(in srgb,var(--ok) 45%,transparent)}
+.sess-ic{font-size:17px;flex:none}
+.sess-main{flex:1;min-width:0;line-height:1.55}
+.sess-main b{display:block;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sess-main small{display:block;font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sess-kill{flex:none;font-size:11.5px;padding:6px 11px;border-color:color-mix(in srgb,var(--danger) 40%,transparent);color:var(--danger)}
