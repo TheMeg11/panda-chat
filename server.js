@@ -90,7 +90,10 @@ const GIF_HOST_OK = /^https:\/\/media\d?\.tenor\.com\/[A-Za-z0-9_-]+\/[A-Za-z0-9
 /* v18 anti-spam mirror aggregator */
 const MIRROR_MERGE_MS = 1500;            // burst window for text merging
 const MIRROR_MERGE_MAX = 3600;           // merged message char ceiling
-const MIRROR_RATE_CAP = 20;              // tg sends per minute before digesting
+/* v33: 20/min silently swallowed media mirrors (skipped:'rate') way too early —
+   a private-chat bot sustains ~1 msg/s comfortably, so 60/min is still safe
+   while photos/videos no longer vanish into the digest */
+const MIRROR_RATE_CAP = 60;              // tg sends per minute before digesting
 const MIRROR_DIGEST_MIN_MS = 60 * 1000;  // min gap between digests
 
 /* SSE stream tickets (v18: token never appears in URLs) */
@@ -734,6 +737,7 @@ function rotateCredentialTo(pw) {
 function hardWipeOnRekey() {
   claimCode = null;
   try { blobs.clear(); } catch {}
+  try { for (const bid of [...blobDisk.keys()]) blobDiskDel(bid); } catch {}
   wipeSite();               // clears messages + TG mirror maps + broadcasts + deletes TG copies
   saveData();
   log('v21 rekey: chat key re-minted — all stored ciphertext wiped');
@@ -935,6 +939,87 @@ const tgMapRecv = new Map();    // telegram message_id -> site msg id
 const sentTgMid = new Map();    // site msg id -> mirrored telegram message_id
 const recvToTg = new Map();     // site msg id -> original telegram message_id (for replies to TG msgs)
 
+/* v33: disk-backed E2EE blobs — media envelopes used to live in the RAM map
+   ONLY, so every restart/redeploy (or LRU eviction) turned every sent photo/
+   video/file into «رسانه در دسترس نیست» for everyone. The envelopes are
+   ALREADY client-encrypted (zero-knowledge intact), so they persist as-is
+   under DATA_DIR/blobs/ with an LRU disk budget. RAM stays the hot cache;
+   the disk is the durable layer. */
+const BLOB_DISK_BUDGET = Math.max(64, Number(process.env.BLOB_DISK_BUDGET_MB) || 900) * 1024 * 1024;
+const BLOB_DIR = path.join(DATA_DIR, 'blobs');
+const blobDisk = new Map();     // bid -> {f, size, ts}
+let blobDiskBytes = 0;
+function blobDiskLoad() {
+  try {
+    fs.mkdirSync(BLOB_DIR, { recursive: true });
+    for (const f of fs.readdirSync(BLOB_DIR)) {
+      if (!/\.json$/.test(f)) continue;
+      try {
+        const st = fs.statSync(path.join(BLOB_DIR, f));
+        const bid = f.replace(/\.json$/, '');
+        if (st.size > MAX_RAW_BLOB + 4096) { fs.unlinkSync(path.join(BLOB_DIR, f)); continue; }
+        blobDisk.set(bid, { f, size: st.size, ts: st.mtimeMs });
+        blobDiskBytes += st.size;
+      } catch {}
+    }
+    if (blobDisk.size) log('blob disk index loaded:', blobDisk.size, 'entries,', Math.round(blobDiskBytes / 1048576) + 'MB');
+  } catch (e) { log('blob disk load fail:', e.message); }
+}
+const blobDiskPath = (bid) => path.join(BLOB_DIR, String(bid).replace(/[^a-z0-9]/gi, '') + '.json');
+function blobDiskEvict() {
+  /* v33: respect BOTH the configured budget and the REAL volume free space —
+     the disk monitor warns at 80% usage, so blobs must yield long before that */
+  let guard = 0;
+  for (;;) {
+    if (++guard > 200) break;
+    const overBudget = blobDiskBytes > BLOB_DISK_BUDGET;
+    let overDisk = false;
+    const du = (typeof diskUsage === 'function') ? diskUsage() : null;
+    if (du && du.total > 0 && (du.free < 1024 * 1024 * 1024 || du.pct > 75)) overDisk = true;
+    if (!overBudget && !overDisk) break;
+    const items = [...blobDisk.entries()].sort((a, b) => a[1].ts - b[1].ts);
+    if (!items.length) break;
+    const [k, v] = items[0];
+    try { fs.unlinkSync(path.join(BLOB_DIR, v.f)); } catch {}
+    blobDiskBytes -= v.size || 0;
+    blobDisk.delete(k);
+    log('evicted blob-disk', k.slice(0, 12));
+    if (!overDisk && blobDiskBytes <= BLOB_DISK_BUDGET * 0.85) break;
+  }
+}
+function blobDiskPut(bid, env) {
+  try {
+    fs.mkdirSync(BLOB_DIR, { recursive: true });
+    const f = blobDiskPath(bid);
+    const tmp = f + '.tmp' + process.pid;
+    fs.writeFileSync(tmp, JSON.stringify(env));
+    fs.renameSync(tmp, f);
+    const st = fs.statSync(f);
+    if (blobDisk.has(bid)) blobDiskBytes -= blobDisk.get(bid).size || 0;
+    blobDisk.set(bid, { f: path.basename(f), size: st.size, ts: Date.now() });
+    blobDiskBytes += st.size;
+    blobDiskEvict();
+  } catch (e) { log('blob disk put fail:', e.message); }
+}
+function blobDiskGet(bid) {
+  const v = blobDisk.get(bid);
+  if (!v) return null;
+  try {
+    const env = JSON.parse(fs.readFileSync(path.join(BLOB_DIR, v.f), 'utf8'));
+    if (!env || !env.iv || !env.c || !env.miv || !env.mc) throw new Error('bad envelope');
+    v.ts = Date.now();
+    return env;
+  } catch { blobDisk.delete(bid); try { fs.unlinkSync(path.join(BLOB_DIR, v.f)); } catch {} return null; }
+}
+function blobDiskDel(bid) {
+  const v = blobDisk.get(bid);
+  if (!v) return;
+  try { fs.unlinkSync(path.join(BLOB_DIR, v.f)); } catch {}
+  blobDiskBytes -= v.size || 0;
+  blobDisk.delete(bid);
+}
+blobDiskLoad();
+
 let blobBytes = 0, tgbBytes = 0;
 function touchLru(map) {
   let total = 0;
@@ -953,12 +1038,20 @@ function budgetEvict(map, label) {
   }
 }
 
+/* v33: one helper to delete a blob EVERYWHERE (RAM + disk). RAM eviction via
+   budgetEvict keeps the disk copy (reloadable); explicit deletion must kill both. */
+function dropBlob(bid) {
+  if (!bid) return;
+  blobs.delete(bid);
+  blobDiskDel(bid);
+}
+
 function pushMessage(m) {
   messages.push(m);
   while (messages.length > MAX_MESSAGES) {
     const old = messages.shift();
     broadcastSafe({ type: 'purge', ids: [old.id] });
-    if (old.meta && old.meta.blob) blobs.delete(old.meta.blob);
+    if (old.meta && old.meta.blob) dropBlob(old.meta.blob);
   }
   return m;
 }
@@ -1681,11 +1774,15 @@ async function bridgeInText(text, msg) {
     t: String(text).slice(0, 4096),
     meta: { k: 'text', tg: 1, from: 'tg',
             name: state.tgPersona.name || null,
-            rt: rly ? (tgMapRecv.get(rly) || null) : null,
+            /* v33: reply targets now resolve for MIRRORED SITE messages too —
+               sentTgMidRev (tg mid -> site id) was never consulted before, so
+               the admin's Telegram replies to site messages arrived unlinked */
+            rt: rly ? (tgMapRecv.get(rly) || sentTgMidRev.get(rly) || null) : null,
             rtTg: rly || undefined,
             rx: rly ? String(rxRaw).replace(/\s+/g, ' ').trim().slice(0, 120) : undefined },
     reacts: null,
   });
+  tgPlainRemember(sid, text);       /* v33: plaintext preview for delete notices */
   broadcast({ type: 'msg', m: messages[messages.length - 1] });
   presenceTick();
 }
@@ -1695,7 +1792,14 @@ async function bridgeInMedia(kind, fileRef, msg, extra) {
   const metaK = KIND_META[kind] ? KIND_META[kind].k : 'file';
   const cap = kind === 'animation' ? 20 : 20;
   const dl = await tgDownload(fileRef, cap).catch((e) => { throw e; });
-  const fid = [...tgFiles.entries()].find(([, v]) => v.buf === dl.buf)[0];
+  /* v33: the LRU could evict the entry between download and lookup — the old
+     `.find(...)[0]` then threw and the whole TG media bridge errored out */
+  let fid = null;
+  for (const [k, v] of tgFiles) if (v.buf === dl.buf) { fid = k; break; }
+  if (!fid) {
+    fid = rid();
+    tgFiles.set(fid, { fid: String(fileRef), buf: dl.buf, mime: dl.mime, size: dl.size, lastTouch: Date.now() });
+  }
   const sid = nextId();
   if (msg.message_id) { tgMapRecv.set(msg.message_id, sid); recvToTg.set(sid, msg.message_id); }
   const rly = msg.reply_to_message && msg.reply_to_message.message_id;
@@ -1713,19 +1817,21 @@ async function bridgeInMedia(kind, fileRef, msg, extra) {
            (kind === 'audio' && msg.audio && msg.audio.duration) ||
            (msg.video && msg.video.duration) || (msg.video_note && msg.video_note.duration) || undefined,
       w: msg.photo ? undefined : (msg.video ? msg.video.width : undefined),
-      rt: rly ? (tgMapRecv.get(rly) || null) : null,
+      /* v33: mirrored-site-message reply targets resolve too (sentTgMidRev) */
+      rt: rly ? (tgMapRecv.get(rly) || sentTgMidRev.get(rly) || null) : null,
       rtTg: rly || undefined,
       rx: rly ? String(rxRaw).replace(/\s+/g, ' ').trim().slice(0, 120) : undefined,
     },
     reacts: null,
   };
   pushMessage(m);
+  tgPlainRemember(sid, (msg.caption ? String(msg.caption).slice(0, 120) : '') || (TG_KIND_LABEL[metaK] || '📎 رسانه'));  /* v33 */
   broadcast({ type: 'msg', m });
   presenceTick();
 }
 
 /* ------------------------- disk monitor (Railway disk guard) ------------------------- */
-const VERSION = 'v31';
+const VERSION = 'v33';
 const bootAt = Date.now();
 
 /* ---------------- v24 passwordless re-entry (same IP, 300 min) ----------------
@@ -2426,9 +2532,22 @@ function tgDeleteMirror(mid) {
 /* v30 — explicit edit/delete notices to the admin bot chat.
    The mirrored TG copy is still edited/deleted in place (v17/v19 behavior);
    this ADDS a small human-visible notice so the admin KNOWS it happened.
-   Rate-capped to avoid flooding on bulk wipes. */
+   Rate-capped to avoid flooding on bulk wipes.
+   v33 — delete notices now NAME the deleted message: the site is E2EE, so
+   the plaintext preview rides along voluntarily from the deleting client
+   (`prev`, same trust model as /api/mirror/text); when no preview arrives
+   (old cached client), the server falls back to its own mirror-plaintext
+   cache (tgPlainCache) so the bot still shows WHICH message was deleted. */
+const tgPlainCache = new Map();   // site msg id -> plaintext preview (FIFO cap)
+function tgPlainRemember(mid, text) {
+  const k = String(mid || '');
+  if (!k) return;
+  tgPlainCache.set(k, String(text || '').replace(/\s+/g, ' ').trim().slice(0, 140));
+  if (tgPlainCache.size > 400) tgPlainCache.delete(tgPlainCache.keys().next().value);
+}
+const TG_KIND_LABEL = { image: '🖼 عکس', video: '🎬 ویدیو', voice: '🎤 ویس', audio: '🎵 آهنگ', file: '📎 فایل', sticker: '✨ استیکر', gif: '🎞 گیف' };
 let edNotifyWin = Date.now(), edNotifyCount = 0;
-function editDeleteNotice(kind, name, count) {
+function editDeleteNotice(kind, name, count, prevs) {
   try {
     const now = Date.now();
     if (now - edNotifyWin > 60000) { edNotifyWin = now; edNotifyCount = 0; }
@@ -2436,9 +2555,18 @@ function editDeleteNotice(kind, name, count) {
     if (!state.adminId) return;
     const who = String(name || '').replace(/[\u0000-\u001f<>]/g, ' ').trim().slice(0, 40) || 'کاربر';
     const n = Number(count) > 1 ? ' (' + faNum(Number(count)) + ' پیام)' : '';
-    const txt = kind === 'edit'
-      ? '✏️ ' + who + ' پیامی را ویرایش کرد'
-      : '🗑 ' + who + ' پیامی را حذف کرد' + n;
+    let txt;
+    if (kind === 'edit') {
+      txt = '✏️ ' + who + ' پیامی را ویرایش کرد';
+    } else {
+      txt = '🗑 ' + who + ' پیامی را حذف کرد' + n;
+      /* v33: show WHICH message died — client previews first, mirror cache second */
+      const list = [...new Set((Array.isArray(prevs) ? prevs : [])
+        .map((p) => String(p || '').replace(/[\u0000-\u001f<>]/g, ' ').trim().slice(0, 120))
+        .filter(Boolean))].slice(0, 5);
+      if (list.length === 1) txt += ':\n«' + list[0] + '»';
+      else if (list.length > 1) txt += ':\n' + list.map((p, i) => faNum(i + 1) + '. «' + p + '»').join('\n');
+    }
     if (TEST_MODE && !TG_TOKEN) { lastTgOut.push({ method: 'sendMessage', payload: { chat_id: state.adminId, text: txt } }); return; }
     tgEnqueue(() => tgCall('sendMessage', { chat_id: state.adminId, text: txt }).catch(() => {}));
   } catch {}
@@ -2474,11 +2602,14 @@ function wipeSite() {
   const tgMids = [];
   for (const m of messages) { const tgm = sentTgMid.get(m.id) || recvToTg.get(m.id); if (tgm) tgMids.push(tgm); }
   messages.length = 0;
+  /* v33: blobs die from RAM AND disk (deletion means deletion) */
   blobs.clear();
+  try { for (const bid of [...blobDisk.keys()]) blobDiskDel(bid); } catch {}
   tgMapRecv.clear();
   sentTgMid.clear();
   sentTgMidRev.clear();
   recvToTg.clear();
+  tgPlainCache.clear();
   broadcastSafe({ type: 'wipe' });
   if (tgMids.length) wipeTgSync(tgMids);
 }
@@ -2568,6 +2699,7 @@ async function mirrorText(mid, text, meta, merged) {
     allow_sending_without_reply: true,
   }));
   mirrorSet(mid, res.message_id);   /* v17: tracks deletion while in flight too */
+  tgPlainRemember(mid, text);       /* v33: remember the plaintext for delete notices */
   /* v19: a merged TG message holds several site texts — its edit would
      corrupt the others, so it is recorded as not-editable */
   if (merged && res.message_id) {
@@ -2652,6 +2784,8 @@ async function mirrorMedia(kind, mimeName, mime, buf, mid, meta, cap) {
         okMid = (await send('sendDocument', fn('document', {}))).message_id;
     }
     mirrorSet(mid, okMid);          /* v17 */
+    /* v33: remember a human-readable preview for delete notices */
+    tgPlainRemember(mid, cap || (TG_KIND_LABEL[kind] || '📎 رسانه') + (mimeName && mimeName !== 'file' ? ' — ' + String(mimeName).slice(0, 60) : ''));
   } catch (e) {
     throw e;
   }
@@ -3553,13 +3687,15 @@ const server = http.createServer(async (req, res) => {
         mirrorSet(mid, tgm);
         return sendJson(res, 200, { ok: true, tgm });
       }
-      if (u === '/__test/bridge') {    // v17: simulate an incoming TG text message
+      if (u === '/__test/bridge') {    // v17: simulate an incoming TG text message (v33: + rly reply target)
         const tgm = Number(b.tgm) || 555;
-        await bridgeInText(String(b.text || 'سلام از تلگرام'), {
+        const tgMsg = {
           message_id: tgm, text: String(b.text || ''),
           from: { id: Number(state.adminId) || 0, first_name: 'test' },
           chat: { id: Number(state.adminId) || 0, type: 'private' },
-        });
+        };
+        if (b.rly) tgMsg.reply_to_message = { message_id: Number(b.rly), text: String(b.rtx || '') };
+        await bridgeInText(String(b.text || 'سلام از تلگرام'), tgMsg);
         const last = messages[messages.length - 1];
         return sendJson(res, 200, { ok: true, id: last.id, tgm });
       }
@@ -3671,25 +3807,39 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { id: m.id, ts: m.ts });
       }
 
-      /* --- encrypted blob store (POST or PUT) --- */
+      /* --- encrypted blob store (POST or PUT) — v33: persisted on the volume --- */
       if (u === '/api/blob' && (req.method === 'POST' || req.method === 'PUT')) {
         const buf = await readRaw(req, MAX_RAW_BLOB).catch(e => { throw Object.assign(e, { code: e.code || 400 }); });
         let env;
         try { env = JSON.parse(buf.toString('utf8')); } catch { return sendJson(res, 400, { error: 'bad envelope' }); }
         if (!env.iv || !env.c || !env.miv || !env.mc) return sendJson(res, 400, { error: 'envelope fields missing' });
         const bid = rid();
-        blobs.set(bid, {
+        const rec = {
           env: { iv: env.iv.slice(0, 32), c: String(env.c).slice(0, MAX_RAW_BLOB), miv: env.miv.slice(0, 32), mc: String(env.mc).slice(0, 512) },
           size: Math.ceil(String(env.c).length * 0.75),
           lastTouch: Date.now(),
-        });
+        };
+        blobs.set(bid, rec);
+        /* v33: the client-encrypted envelope is durable now — restarts, redeploys
+           and RAM eviction no longer turn sent media into «رسانه در دسترس نیست» */
+        blobDiskPut(bid, rec.env);
         budgetEvict(blobs, 'blob');
         return sendJson(res, 200, { bid });
       }
 
       if (u.startsWith('/api/blob/') && req.method === 'GET') {
         const bid = u.slice('/api/blob/'.length);
-        const rec = blobs.get(bid);
+        let rec = blobs.get(bid);
+        if (!rec) {
+          /* v33: cold load from the volume — RAM is only a hot cache now */
+          const env = blobDiskGet(bid);
+          if (env) {
+            rec = { env, size: Math.ceil(String(env.c).length * 0.75), lastTouch: Date.now() };
+            blobs.set(bid, rec);
+            budgetEvict(blobs, 'blob');
+            rec = blobs.get(bid) || rec;
+          }
+        }
         if (!rec) return sendJson(res, 404, { error: 'not found' });
         rec.lastTouch = Date.now();
         /* v25: immutable — one bid = one encrypted envelope, forever */
@@ -4053,6 +4203,7 @@ const server = http.createServer(async (req, res) => {
         const nm = decodeURIComponent(String(req.headers['x-vault-name'] || 'file'));
         const buf = await readRaw(req, MAX_MIRROR_MEDIA);
         if (!buf.length) return sendJson(res, 400, { error: 'empty body' });
+        if (!state.adminId) return sendJson(res, 200, { ok: true, skipped: 'noadmin' });   /* v33: bot not linked yet — do not 500 */
         if (!tgRateTick()) {
           /* anti-spam: over the per-minute cap the media is NOT mirrored;
              a digest line tells the admin how much stayed in the site */
@@ -4093,19 +4244,30 @@ const server = http.createServer(async (req, res) => {
       if (u === '/api/delete' && req.method === 'POST') {
         const b = await readJson(req);
         const ids = Array.isArray(b.ids) ? b.ids.map(String).slice(0, 100) : [];
+        /* v33: plaintext previews from the deleting client (E2EE — the server
+           cannot decrypt; the client volunteers them so the bot can name the
+           deleted message, same trust model as /api/mirror/text) */
+        const rawPrev = Array.isArray(b.prev) ? b.prev.map(String) : [];
         const tgMids = [];
+        const prevs = [];
+        let prevIdx = 0;
         for (const id of ids) {
           const i = messages.findIndex(x => x.id === id);
-          if (i >= 0) { const mm = messages[i]; if (mm.meta && mm.meta.blob) blobs.delete(mm.meta.blob); messages.splice(i, 1); }
+          if (i >= 0) { const mm = messages[i]; if (mm.meta && mm.meta.blob) dropBlob(mm.meta.blob); messages.splice(i, 1); }
           /* v17: the telegram mirror (or the original TG message) dies here too */
           const tgm = sentTgMid.get(id) || recvToTg.get(id);
           if (tgm) { sentTgMid.delete(id); recvToTg.delete(id); tgMapRecv.delete(tgm); tgMids.push(tgm); }
+          /* v33: preview = client-provided → server mirror cache → empty */
+          let pv = '';
+          if (prevIdx < rawPrev.length) { pv = rawPrev[prevIdx]; prevIdx++; }
+          if (!pv && tgPlainCache.has(id)) pv = tgPlainCache.get(id);
+          if (pv) prevs.push(String(pv).replace(/[\u0000-\u001f<>]/g, ' ').trim().slice(0, 120));
         }
         if (ids.length) {
           broadcast({ type: 'del', ids });
-          /* v30: notify the admin bot chat about the deletion */
+          /* v30/v33: notify the admin bot chat — now WITH the deleted content */
           const _s = sessions.get(String(req.headers['authorization'] || '').replace(/^Bearer\s+/i, ''));
-          editDeleteNotice('del', (_s && _s.name) || 'کاربر', ids.length);
+          editDeleteNotice('del', (_s && _s.name) || 'کاربر', ids.length, prevs);
         }
         for (const tgm of tgMids) tgDeleteMirror(tgm);
         return sendJson(res, 200, { ok: true, tgSynced: tgMids.length });

@@ -501,7 +501,9 @@
     mediaHoldSheet.classList.remove('on');
     const ctx = mediaHoldCtx; if (!ctx || !ctx.m || !ctx.m.id) return;
     confirmDialog('حذف این رسانه؟', 'این استیکر/گیف برای همه حذف می‌شود.', 'حذف کن', async () => {
-      await API('/api/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: [String(ctx.m.id)] }) }).catch(() => {});
+      /* v32: media preview (kind + name/caption) for the bot's delete notice */
+      const pv = await delPreview(ctx.m).catch(() => '');
+      await API('/api/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: [String(ctx.m.id)], prev: [pv] }) }).catch(() => {});
     });
   };
   $('mhCloud').onclick = async () => {
@@ -1047,6 +1049,22 @@
     return (m.t || '').slice(0, 100);
   }
 
+  /* v32: human-readable preview of a message for the bot's DELETE notice —
+     the site is E2EE, so the decrypted text rides along voluntarily
+     (same trust model as mirror/text) and the bot chat shows WHICH
+     message was deleted: «🗑 فلان این پیام را حذف کرد: «متن»». */
+  const DEL_KIND_LABEL = { image: '🖼 عکس', video: '🎬 ویدیو', voice: '🎤 ویس', audio: '🎵 آهنگ', file: '📎 فایل', sticker: '✨ استیکر', gif: '🎞 گیف' };
+  async function delPreview(m) {
+    if (!m) return '';
+    const label = DEL_KIND_LABEL[(m.meta && m.meta.k)] || '';
+    let txt = '';
+    try { txt = String(await msgTextPreview(m) || '').replace(/\s+/g, ' ').trim(); } catch {}
+    if (txt && !/^(استیکر|گیف)$/.test(txt)) return (label ? label + ' — ' : '') + txt.slice(0, 80);
+    if (label) return label;
+    if (m.meta && m.meta.name) return String(m.meta.name).replace(/\s+/g, ' ').trim().slice(0, 60);
+    return 'پیام';
+  }
+
   $('msReply').onclick = () => {
     msgSheet.classList.remove('on');
     armReply(msgs.get(sheetTargetId));
@@ -1067,7 +1085,9 @@
     msgSheet.classList.remove('on');
     const id = sheetTargetId;
     confirmDialog('حذف پیام؟', 'این پیام برای همه حذف می‌شود.', 'حذف کن', async () => {
-      await API('/api/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: [id] }) }).catch(() => {});
+      /* v32: preview rides to the server so the bot chat names the deleted message */
+      const pv = await delPreview(msgs.get(id)).catch(() => '');
+      await API('/api/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: [id], prev: [pv] }) }).catch(() => {});
     });
   };
   $('msPin').onclick = () => {   /* v30: pin/unpin via the message sheet */
@@ -1704,7 +1724,11 @@
   /* ============================================================
      ATTACHMENTS / UPLOAD PIPELINE
      ============================================================ */
-  const KIND_CAPS = { image: 15, video: 50, voice: 25, audio: 40, file: 45 };
+  /* v32: video/file caps lowered 50/45 → 45/45 — the encrypted JSON envelope
+     (~1.37×) must fit MAX_RAW_BLOB (62MB) on the server, which now rejects
+     over-cap uploads with 413 instead of silently truncating them into
+     «رسانه در دسترس نیست» bubbles. */
+  const KIND_CAPS = { image: 15, video: 45, voice: 25, audio: 40, file: 45 };
 
   function classify(f) {
     if (f.type.startsWith('image/')) return 'image';
@@ -1875,7 +1899,12 @@
       const cv = new OffscreenCanvas(Math.round(img.width * scale), Math.round(img.height * scale));
       cv.getContext('2d').drawImage(img, 0, 0);
       const blob = await cv.convertToBlob({ type: 'image/jpeg', quality: .88 });
-      if (blob.size < file.size) return new File([blob], (file.name || 'photo') + '.jpg', { type: 'image/jpeg' });
+      if (blob.size < file.size) {
+        /* v32 fix: no more «big-photo.jpg.jpg» — append .jpg only when missing */
+        const nm = String(file.name || 'photo');
+        const outName = /\.[a-z0-9]{2,5}$/i.test(nm) ? nm.replace(/\.[a-z0-9]{2,5}$/i, '.jpg') : nm + '.jpg';
+        return new File([blob], outName, { type: 'image/jpeg' });
+      }
     } catch {}
     return file;
   }
@@ -2197,6 +2226,7 @@
         stkEmpty = $('stkEmpty');
   let stickerList = null;
   const stickerUrls = new Map();
+  const stickerDead = new Set();    /* v32: ids that fail to decrypt (old-key stickers) */
   const STK_CAP = 120, STK_FILE_CAP = 4.5 * 1048576;
 
   async function stickerSource(id) {
@@ -2248,7 +2278,18 @@
             t.insertBefore(im, t.firstChild);
           }
         }
-      }).catch(() => {});
+      }).catch(() => {
+        /* v32 FIX: a sticker encrypted with a retired chat key used to render
+           as a permanently BLANK tile — users saw an empty panel and a broken
+           bubble after sending. Show an explicit dead state instead. */
+        stickerDead.add(s.id);
+        const t = stickerGrid.querySelector('.stk-item[data-id="' + s.id + '"]');
+        if (t && !t.querySelector('img, video')) {
+          t.classList.add('stk-dead');
+          t.title = 'استیکر با کلید قدیمی رمز شده — قابل نمایش و ارسال نیست';
+          t.insertAdjacentHTML('beforeend', '<span class="stk-dead-ic">⚠️</span>');
+        }
+      });
     }
   }
 
@@ -2263,6 +2304,7 @@
         stickerList = (stickerList || []).filter(s => s.id !== id);
         const rec = stickerUrls.get(id);
         if (rec) { URL.revokeObjectURL(rec.url); stickerUrls.delete(id); }
+        stickerDead.delete(id);   /* v32 */
         paintStickers();
         toast('حذف شد ✓', 'ok');
       } else toast('حذف ناموفق', 'err');
@@ -2306,6 +2348,13 @@
 
   async function sendCloudSticker(rec) {
     if (!aesKey) return;
+    /* v32 FIX: stickers encrypted with a retired chat key can never render —
+       sending one produced «رسانه در دسترس نیست» for everyone. Block the send
+       with a clear message instead (the tile shows the same ⚠️ state). */
+    if (stickerDead.has(rec.id)) {
+      toast('این استیکر با کلید قدیمی رمز شده و قابل ارسال نیست — با حالت مدیریت حذفش کنید', 'err');
+      return;
+    }
     const reply = ctxMode && ctxMode.mode === 'reply' ? ctxMode.id : undefined;
     hideCtxBanner();
     try {
@@ -2313,6 +2362,8 @@
       const meta = { k: kind, from: myTag, un: prefs.name || '', blob: 'stk:' + rec.id };
       if (reply) meta.rt = reply;
       const nEnc = await encText(kind === 'gif' ? 'گیف' : 'استیکر');
+      /* make sure the bytes decrypt for THIS session before publishing */
+      await stickerSource(rec.id);
       const r = await API('/api/send', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ iv: nEnc.iv, c: nEnc.c, meta }) });
       if (!r.ok) throw 0;
